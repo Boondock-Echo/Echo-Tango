@@ -1,15 +1,46 @@
+![images\Boondock100px.png](images\Boondock100px.png)
+
+# Boondock TANGO / ECHO Hardware
+
+- Assembled devices are available for purchase from [Ham Radio Outlet](https://www.hamradio.com)
+- Development kits are available for purchase from [MakerFabs](https://www.makerfabs.com/boondock-echo-barebones-edition.html)
+- Functional [ESP32-A1S Audiokit](https://www.google.com/search?q=esp32-a1s+audio+kit) development boards are available from Amazon, eBay, and AliExpress.
+- 3D printable cases, PCB design files, and Sticker artwork are available in the [Boondock Hardware Repository](https://github.com/Boondock-Echo/Boondock-Hardware)
+
+## Boondock ECHO
+
+![Boondock Echo complete Assembly](images\BoondockEchoAssembled.png)
+
+Complete Boondock Echo Assembly
+
+![A Boondock Echo development board](images/boondock-echo-internal.png)
+
+Boondock Echo Development Board (ESP32-A1S + Sidekick)
+
+## Boondock Tango
+
+![Boondock Tango complete assembly](images\Booddock-Tango-scanner-front.png)
+
+Complete Boondock Tango Assembly
+
+![Boondock Tango development board](images\esp32-a1s_audiokit.png)
+
+Boondock Tango Development Board
+
 # Boondock TANGO / ECHO Firmware
 
-Firmware for Boondock TANGO and ECHO ESP32 audio devices. A single codebase
-builds two product variants that capture audio, create voice-activated WAV
-recordings, store or queue those recordings, and provide a device-hosted web
-interface for setup, monitoring, playback, and administration.
+Firmware for [Boondock TANGO](https://boondockecho.com/product/tango) and [ECHO](https://boondockecho.com/product/echo) ESP32 audio devices. A single codebase builds two product variants that capture audio, create voice-activated WAV recordings, store or queue those recordings, and provide a device-hosted web interface for setup, monitoring, playback, and administration.
 
-> [!IMPORTANT]
+> ---
+>
+> ## `IMPORTANT`
+>
 > This project is a supplemental informational and hobby tool, **not** an
 > emergency service, dispatch system, or life-safety system. Do not rely on it
 > to protect people or property. Read [SAFETY.md](SAFETY.md) and the restrictions
 > in [LICENSE.md](LICENSE.md) before building or using the firmware.
+>
+> ---
 
 ## Contents
 
@@ -54,10 +85,10 @@ are available in [docs/recorder.md](docs/recorder.md) and
 
 PlatformIO defines two build environments in [`platformio.ini`](platformio.ini):
 
-| Environment | Build define | Intended product | Variant-specific behavior |
-| --- | --- | --- | --- |
-| `TANGO` | `TANGO` | Boondock Tango | Configurable stereo record-input channel; SD recording is disabled by default until enabled in **Advanced**. |
-| `ECHO` | `ECHO` | Boondock Echo | ECHO speaker, LED/keypad, CW, and MQTT integration; SD recording is enabled by default. Enter the device's MQTT key in **Advanced** when MQTT service access is required. |
+| Environment | Build define | Intended product                                        | Variant-specific behavior                                                                                                                                                 |
+| ----------- | ------------ | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TANGO`     | `TANGO`      | [Boondock Tango](https://boondockecho.com/product/echo) | Configurable stereo record-input channel; SD recording is disabled by default until enabled in **Advanced**.                                                              |
+| `ECHO`      | `ECHO`       | [Boondock Echo](https://boondockecho.com/product/tango) | ECHO speaker, LED/keypad, CW, and MQTT integration; SD recording is enabled by default. Enter the device's MQTT key in **Advanced** when MQTT service access is required. |
 
 Both environments target `esp32dev`, use the Arduino framework, run the ESP32
 at 160 MHz, expect PSRAM, use the `min_spiffs.csv` partition layout, and build
@@ -309,18 +340,18 @@ networks may require authentication flows the setup form does not provide.
 
 ## Documentation
 
-| Document | Purpose |
-| --- | --- |
-| [Architecture](docs/ARCHITECTURE.md) | Components, tasks, and data flow |
-| [Application startup](docs/Application.md) | Boot and FreeRTOS task sequence |
-| [Recorder](docs/recorder.md) | Detection, recording, and live-audio flow |
-| [Uploader](docs/Uploader.md) | Queues, storage lifecycle, and uploads |
-| [Device API](docs/API.md) | Local HTTP API, command API, and parameters |
-| [Serial CLI](docs/CLI.md) | Commands and serial response formats |
-| [Settings](docs/SETTINGS.md) | Configuration JSON reference |
-| [Cloud API](docs/BOONDOCK_API.md) | Audio, event, log, firmware, and settings requests |
-| [Serial telemetry](docs/SERIAL_STATUS.md) | Automated serial message types |
-| [ECHO feature inventory](ECHO-2024.md) | Current-versus-legacy feature comparison |
+| Document                                   | Purpose                                            |
+| ------------------------------------------ | -------------------------------------------------- |
+| [Architecture](docs/ARCHITECTURE.md)       | Components, tasks, and data flow                   |
+| [Application startup](docs/Application.md) | Boot and FreeRTOS task sequence                    |
+| [Recorder](docs/recorder.md)               | Detection, recording, and live-audio flow          |
+| [Uploader](docs/Uploader.md)               | Queues, storage lifecycle, and uploads             |
+| [Device API](docs/API.md)                  | Local HTTP API, command API, and parameters        |
+| [Serial CLI](docs/CLI.md)                  | Commands and serial response formats               |
+| [Settings](docs/SETTINGS.md)               | Configuration JSON reference                       |
+| [Cloud API](docs/BOONDOCK_API.md)          | Audio, event, log, firmware, and settings requests |
+| [Serial telemetry](docs/SERIAL_STATUS.md)  | Automated serial message types                     |
+| [ECHO feature inventory](ECHO-2024.md)     | Current-versus-legacy feature comparison           |
 
 Some files in `docs/` are engineering analyses, recommendations, or historical
 release notes rather than a promise of current behavior. For implementation
