@@ -1,0 +1,10 @@
+.pio/*
+.vscode/.browse.c_cpp.db*
+.vscode/ipch
+.pio/build/TANGO/idedata.json
+.vscode/settings.json
+tests/*
+.pio/build/project.checksum
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.pio/build/project.checksum
