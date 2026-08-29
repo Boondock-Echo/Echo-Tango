@@ -1,49 +1,24 @@
-![images\Boondock100px.png](images\Boondock100px.png)
-
-# Boondock TANGO / ECHO Hardware
-
-- Assembled devices are available for purchase from [Ham Radio Outlet](https://www.hamradio.com)
-- Development kits are available for purchase from [MakerFabs](https://www.makerfabs.com/boondock-echo-barebones-edition.html)
-- Functional [ESP32-A1S Audiokit](https://www.google.com/search?q=esp32-a1s+audio+kit) development boards are available from Amazon, eBay, and AliExpress.
-- 3D printable cases, PCB design files, and Sticker artwork are available in the [Boondock Hardware Repository](https://github.com/Boondock-Echo/Boondock-Hardware)
-
-## Boondock ECHO
-
-![Boondock Echo complete Assembly](images\BoondockEchoAssembled.png)
-
-Complete Boondock Echo Assembly
-
-![A Boondock Echo development board](images/boondock-echo-internal.png)
-
-Boondock Echo Development Board (ESP32-A1S + Sidekick)
-
-## Boondock Tango
-
-![Boondock Tango complete assembly](images\Booddock-Tango-scanner-front.png)
-
-Complete Boondock Tango Assembly
-
-![Boondock Tango development board](images\esp32-a1s_audiokit.png)
-
-Boondock Tango Development Board
-
 # Boondock TANGO / ECHO Firmware
 
-Firmware for [Boondock TANGO](https://boondockecho.com/product/tango) and [ECHO](https://boondockecho.com/product/echo) ESP32 audio devices. A single codebase builds two product variants that capture audio, create voice-activated WAV recordings, store or queue those recordings, and provide a device-hosted web interface for setup, monitoring, playback, and administration.
+<p align="center">
+  <img src="images/Boondock100px.png" alt="Boondock Technologies logo" width="100">
+</p>
 
-> ---
->
-> ## `IMPORTANT`
->
+Firmware for [Boondock TANGO](https://boondockecho.com/product/tango) and
+[ECHO](https://boondockecho.com/product/echo) ESP32 audio devices. A single
+codebase builds two product variants that capture audio, create voice-activated
+WAV recordings, store or queue those recordings, and provide a device-hosted
+web interface for setup, monitoring, playback, and administration.
+
+> [!IMPORTANT]
 > This project is a supplemental informational and hobby tool, **not** an
 > emergency service, dispatch system, or life-safety system. Do not rely on it
 > to protect people or property. Read [SAFETY.md](SAFETY.md) and the restrictions
 > in [LICENSE.md](LICENSE.md) before building or using the firmware.
->
-> ---
 
 ## Contents
 
+- [Hardware at a glance](#hardware-at-a-glance)
 - [What the firmware does](#what-the-firmware-does)
 - [Firmware variants](#firmware-variants)
 - [Hardware and software requirements](#hardware-and-software-requirements)
@@ -56,6 +31,25 @@ Firmware for [Boondock TANGO](https://boondockecho.com/product/tango) and [ECHO]
 - [Troubleshooting](#troubleshooting)
 - [Documentation](#documentation)
 - [License, safety, and contributions](#license-safety-and-contributions)
+
+## Hardware at a glance
+
+The firmware supports two related products:
+
+| Product | Complete device | Development hardware |
+| --- | --- | --- |
+| **Boondock ECHO** | <img src="images/BoondockEchoAssembled.png" alt="Complete Boondock ECHO assembly" width="320"><br>Complete ECHO assembly | <img src="images/boondock-echo-internal.png" alt="Boondock ECHO development board with ESP32-A1S and Sidekick" width="320"><br>ESP32-A1S with Sidekick |
+| **Boondock TANGO** | <img src="images/Booddock-Tango-scanner-front.png" alt="Complete Boondock TANGO assembly" width="320"><br>Complete TANGO assembly | <img src="images/esp32-a1s_audiokit.png" alt="ESP32-A1S AudioKit development board for Boondock TANGO" width="320"><br>ESP32-A1S AudioKit |
+
+### Hardware sources
+
+- Assembled devices are available from [Ham Radio Outlet](https://www.hamradio.com/).
+- The [Makerfabs Boondock ECHO Barebones Edition](https://www.makerfabs.com/boondock-echo-barebones-edition.html)
+  is available for development projects.
+- ESP32-A1S AudioKit development boards are also sold by common electronics
+  marketplaces.
+- 3D-printable cases, PCB design files, and sticker artwork are available in the
+  [Boondock Hardware repository](https://github.com/Boondock-Echo/Boondock-Hardware).
 
 ## What the firmware does
 
@@ -87,8 +81,8 @@ PlatformIO defines two build environments in [`platformio.ini`](platformio.ini):
 
 | Environment | Build define | Intended product                                        | Variant-specific behavior                                                                                                                                                 |
 | ----------- | ------------ | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TANGO`     | `TANGO`      | [Boondock Tango](https://boondockecho.com/product/echo) | Configurable stereo record-input channel; SD recording is disabled by default until enabled in **Advanced**.                                                              |
-| `ECHO`      | `ECHO`       | [Boondock Echo](https://boondockecho.com/product/tango) | ECHO speaker, LED/keypad, CW, and MQTT integration; SD recording is enabled by default. Enter the device's MQTT key in **Advanced** when MQTT service access is required. |
+| `TANGO`     | `TANGO`      | [Boondock Tango](https://boondockecho.com/product/tango) | Configurable stereo record-input channel; SD recording is disabled by default until enabled in **Advanced**.                                                              |
+| `ECHO`      | `ECHO`       | [Boondock Echo](https://boondockecho.com/product/echo) | ECHO speaker, LED/keypad, CW, and MQTT integration; SD recording is enabled by default. Enter the device's MQTT key in **Advanced** when MQTT service access is required. |
 
 Both environments target `esp32dev`, use the Arduino framework, run the ESP32
 at 160 MHz, expect PSRAM, use the `min_spiffs.csv` partition layout, and build
