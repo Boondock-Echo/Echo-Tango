@@ -16,7 +16,7 @@ interface for setup, monitoring, playback, and administration.
 - [What the firmware does](#what-the-firmware-does)
 - [Firmware variants](#firmware-variants)
 - [Hardware and software requirements](#hardware-and-software-requirements)
-- [Build and flash](#build-and-flash)
+- [Firmware downloads and programming](#firmware-downloads-and-programming)
 - [First-time setup](#first-time-setup)
 - [Using the device](#using-the-device)
 - [Configuration and interfaces](#configuration-and-interfaces)
@@ -80,78 +80,23 @@ other product unless you understand the hardware and compile-time differences.
 
 ### Software
 
-- [PlatformIO](https://platformio.org/) Core or the PlatformIO IDE extension.
+- Visual Studio Code with the PlatformIO IDE extension when building or
+  programming the firmware yourself.
 - Python 3, used by the embedded-web-asset generation script.
 - A supported USB-to-serial driver for your host and device.
 - Git, if you are working from a clone of this repository.
 
-All commands below are run from the repository root.
+## Firmware downloads and programming
 
-## Build and flash
+Ready-to-flash compiled `.bin` firmware files are available on the
+[GitHub Releases page](https://github.com/Boondock-Echo/Echo-Tango/releases).
+Choose the binary for your device variant; TANGO and ECHO firmware are not
+interchangeable.
 
-### 1. Build the correct variant
-
-```bash
-# Tango
-pio run -e TANGO
-
-# Echo
-pio run -e ECHO
-```
-
-On the first build, PlatformIO resolves the dependencies declared in
-`platformio.ini`. The repository also contains several vendored libraries under
-`lib/`.
-
-### 2. Connect and identify the serial port
-
-```bash
-pio device list
-```
-
-If PlatformIO finds more than one candidate, pass the appropriate port with
-`--upload-port`, for example `/dev/ttyUSB0`, `/dev/cu.usbserial-...`, or `COM3`.
-
-### 3. Upload the firmware
-
-```bash
-# Tango
-pio run -e TANGO --target upload
-
-# Echo
-pio run -e ECHO --target upload
-```
-
-With an explicit port:
-
-```bash
-pio run -e TANGO --target upload --upload-port /dev/ttyUSB0
-```
-
-### 4. Monitor startup
-
-The serial monitor is configured for 115200 baud:
-
-```bash
-pio device monitor --baud 115200
-```
-
-Press the device reset button if startup output does not appear. Leave the
-monitor with PlatformIO's displayed exit shortcut (normally `Ctrl+C`).
-
-### Erase persistent settings
-
-The following command erases the ESP32 flash, including saved Wi-Fi credentials
-and settings. Use the environment that matches the device, then upload firmware
-again:
-
-```bash
-pio run -e TANGO --target erase
-# or: pio run -e ECHO --target erase
-```
-
-For ordinary configuration recovery, prefer **Set Default** or **Factory
-Reset** in the web UI rather than erasing the entire flash.
+To build or program an ESP32 from Visual Studio Code, follow PlatformIO's
+official [PlatformIO IDE for VS Code quick-start guide](https://docs.platformio.org/en/latest/integration/ide/vscode.html#quick-start).
+Open this repository as the PlatformIO project and select the environment that
+matches your device (`TANGO` or `ECHO`).
 
 ## First-time setup
 
