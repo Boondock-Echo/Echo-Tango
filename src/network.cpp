@@ -221,7 +221,8 @@ namespace
 			return "[null]";
 		}
 		// Return generic placeholder to avoid exposing server infrastructure
-		return "boondockecho.com";
+		//return "boondockecho.com";
+		return host;
 	}
 
 	bool wifiEverConnected = false;
@@ -372,6 +373,46 @@ namespace
 	}
 
 	static constexpr uint32_t kUploadChunksPerYield = 4u;
+
+		static unsigned long uploadBodyTimeoutMs(size_t contentLength)
+	{
+		const uint64_t estimatedMs =
+			(static_cast<uint64_t>(contentLength) * 1000ULL + UPLOAD_MIN_BYTES_PER_SECOND - 1ULL) /
+			UPLOAD_MIN_BYTES_PER_SECOND;
+		return estimatedMs > UPLOAD_BODY_TIMEOUT_MS ? static_cast<unsigned long>(estimatedMs) : UPLOAD_BODY_TIMEOUT_MS;
+	}
+
+	// A socket write may accept fewer bytes than requested. Retry the remainder so
+	// Content-Length always matches the body received by the edge.
+	static bool writeUploadBytes(WiFiClient &client, const uint8_t *data, size_t length,
+								 unsigned long bodyStartMs, unsigned long bodyTimeoutMs,
+								 size_t &bodyBytesSent)
+	{
+		size_t offset = 0;
+		unsigned long lastProgressMs = millis();
+		while (offset < length)
+		{
+			const unsigned long now = millis();
+			if ((now - bodyStartMs) >= bodyTimeoutMs ||
+				(now - lastProgressMs) >= UPLOAD_WRITE_STALL_TIMEOUT_MS || !client.connected())
+			{
+				return false;
+			}
+			const size_t written = client.write(data + offset, length - offset);
+			if (written > 0)
+			{
+				offset += written;
+				bodyBytesSent += written;
+				lastProgressMs = millis();
+			}
+			else
+			{
+				vTaskDelay(1);
+			}
+			esp_task_wdt_reset();
+		}
+		return true;
+	}
 
 	// Exponential backoff between TCP retries; always brief cooldown after final failure (incl. maxRetries=1).
 	static void delayAfterTcpConnectFailure(uint8_t attempt, uint8_t maxRetries)
@@ -1496,7 +1537,6 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 	}
 
 	const String isoTimestamp = formatIsoTimestamp(request.recordedAtEpoch, request.recordedAtMs);
-	// convertToMp3 will be set per-endpoint in the loop below
 
 	// These parts are common for all endpoints
 	String macPart = "--" + boundary + lineBreak +
@@ -1548,7 +1588,10 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 
 	// Limit total time for all endpoint attempts to prevent watchdog timeout
 	const unsigned long uploadStartMs = millis();
-	constexpr unsigned long kMaxTotalUploadTimeMs = UPLOAD_TOTAL_TIMEOUT_MS;
+	const unsigned long bodyTimeoutMs = uploadBodyTimeoutMs(fileSize);
+	const unsigned long kMaxTotalUploadTimeMs =
+		(bodyTimeoutMs + UPLOAD_RESPONSE_WAIT_MS > UPLOAD_TOTAL_TIMEOUT_MS)
+			? bodyTimeoutMs + UPLOAD_RESPONSE_WAIT_MS : UPLOAD_TOTAL_TIMEOUT_MS;
 
 	size_t order[kApiEndpointCount];
 	size_t orderCount = 0;
@@ -1610,21 +1653,15 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 
 		WiFiClient *clientPtr = &g_networkSharedWiFiClient;
 		clientPtr->stop();
-		// Always convert to MP3
-		bool convertToMp3 = true;
-
-		// Generate convertMp3Part per-endpoint
-		String convertMp3Part = "--" + boundary + lineBreak +
-								"Content-Disposition: form-data; name=\"convert_to_mp3\"" + lineBreak + lineBreak +
-								(convertToMp3 ? "true" : "false") + lineBreak;
 
 		// Calculate content length for this endpoint
-		const size_t contentLength = convertMp3Part.length() + macPart.length() +
+		const size_t contentLength = macPart.length() +
 									 (sendTags ? tagsPart.length() : 0) +
 									 fileHeader.length() + closing.length() + fileSize;
 
 		bool attemptSuccess = true;
 		String attemptError;
+		unsigned long responseTimeMs;
 
 		// Feed watchdog before connection attempt
 		esp_task_wdt_reset();
@@ -1658,11 +1695,13 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 							 String(static_cast<unsigned long>(contentLength)) + "\r\n"
 																				 "Connection: close\r\n";
 
+			// Stable across retries; the edge/API must deduplicate this key.
+			headers += "Idempotency-Key: " + deviceId + ":" + uploadFileName + ":" + String(fileSize) + "\r\n";
+
 			clientPtr->print(requestLine + "\r\n");
 			clientPtr->print(headers);
 			clientPtr->print("\r\n");
 
-			clientPtr->print(convertMp3Part);
 			clientPtr->print(macPart);
 			if (sendTags)
 			{
@@ -1671,6 +1710,8 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			clientPtr->print(fileHeader);
 
 			// Upload audio data
+			size_t bodyBytesSent = 0;
+			bool bodyComplete = true;
 			unsigned long uploadStartMs = millis();
 			if (request.isPsramMode && request.psramData != nullptr)
 			{
@@ -1684,7 +1725,11 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 				{
 					size_t chunkSize = (remaining > sizeof(uploadBuffer)) ? sizeof(uploadBuffer) : remaining;
 					std::memcpy(uploadBuffer, dataPtr, chunkSize);
-					clientPtr->write(uploadBuffer, chunkSize);
+					if (!writeUploadBytes(*clientPtr, uploadBuffer, chunkSize, uploadStartMs, bodyTimeoutMs, bodyBytesSent))
+					{
+						bodyComplete = false;
+						break;
+					}
 					dataPtr += chunkSize;
 					remaining -= chunkSize;
 
@@ -1701,13 +1746,6 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 						chunkCount = 0;
 						lastWatchdogFeedMs = now;
 					}
-
-					// Safety timeout: if upload takes too long, abort (see UPLOAD_BODY_TIMEOUT_MS)
-					if ((now - uploadStartMs) > UPLOAD_BODY_TIMEOUT_MS)
-					{
-						logWarnf("[Upload] Upload timeout after %lu seconds, aborting\n", static_cast<unsigned long>(UPLOAD_BODY_TIMEOUT_MS / 1000));
-						break;
-					}
 				}
 			}
 			else
@@ -1719,7 +1757,11 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 				unsigned long lastWatchdogFeedMs = millis();
 				while ((bytesRead = audioFile.read(uploadBuffer, sizeof(uploadBuffer))) > 0)
 				{
-					clientPtr->write(uploadBuffer, bytesRead);
+					if (!writeUploadBytes(*clientPtr, uploadBuffer, bytesRead, uploadStartMs, bodyTimeoutMs, bodyBytesSent))
+					{
+						bodyComplete = false;
+						break;
+					}
 
 					if ((++yieldCount & (kUploadChunksPerYield - 1u)) == 0u)
 					{
@@ -1735,12 +1777,6 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 						lastWatchdogFeedMs = now;
 					}
 
-					// Safety timeout: if upload takes too long, abort (see UPLOAD_BODY_TIMEOUT_MS)
-					if ((now - uploadStartMs) > UPLOAD_BODY_TIMEOUT_MS)
-					{
-						logWarnf("[Upload] Upload timeout after %lu seconds, aborting\n", static_cast<unsigned long>(UPLOAD_BODY_TIMEOUT_MS / 1000));
-						break;
-					}
 				}
 				// Check for read errors (bytesRead == 0 but file not at end)
 				if (bytesRead == 0 && audioFile.available() > 0)
@@ -1754,7 +1790,20 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 				}
 			}
 
-			clientPtr->print(closing);
+			if (bodyComplete)
+			{
+				bodyComplete = writeUploadBytes(*clientPtr, reinterpret_cast<const uint8_t *>(closing.c_str()),
+										closing.length(), uploadStartMs, bodyTimeoutMs, bodyBytesSent);
+			}
+			if (!bodyComplete)
+			{
+				attemptSuccess = false;
+				attemptError = "body_incomplete";
+				logWarnf("[Upload] Body incomplete after %lums: sent %lu/%lu bytes (timeout %lums)\n",
+						 millis() - uploadStartMs, static_cast<unsigned long>(bodyBytesSent),
+						 static_cast<unsigned long>(fileSize + closing.length()), bodyTimeoutMs);
+				clientPtr->stop();
+			}
 
 			unsigned long responseStartMs = millis();
 			unsigned long responseTimer = responseStartMs;
@@ -1763,7 +1812,7 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			unsigned long lastWatchdogFeedMs = millis();
 			constexpr unsigned long kMaxResponseWaitMs = UPLOAD_RESPONSE_WAIT_MS;
 
-			while ((millis() - responseStartMs) < kMaxResponseWaitMs)
+			while (bodyComplete && (millis() - responseStartMs) < kMaxResponseWaitMs)
 			{
 				// Feed watchdog more frequently: every 10 iterations OR every 500ms (whichever comes first)
 				unsigned long now = millis();
@@ -1803,12 +1852,22 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 
 				delay(10);
 			}
+			responseTimeMs = millis() - attemptStartMs;
 
-			if (response.isEmpty())
+			if (!bodyComplete)
+			{
+				// Preserve body_incomplete instead of parsing an empty response.
+				attemptSuccess = false;
+				attemptError = "body_incomplete";
+				logWarnf("[Upload] Body incomplete from %s:%u - file: %s (response %lums)\n", endpoint.host, endpointPort, 
+					sourcePath.c_str(), static_cast<unsigned long>(responseTimeMs));
+			}
+			else if (response.isEmpty())
 			{
 				attemptSuccess = false;
 				attemptError = "empty_response";
-				logWarnf("[Upload] Empty response from %s:%u\n", endpoint.host, endpointPort);
+				logWarnf("[Upload] Empty response from %s:%u - file: %s (response %lums)\n", endpoint.host, endpointPort, 
+					sourcePath.c_str(), static_cast<unsigned long>(responseTimeMs));
 			}
 			else
 			{
@@ -1858,7 +1917,6 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 		}
 
 		// Record endpoint request metrics
-		unsigned long responseTimeMs = millis() - attemptStartMs;
 		network_recordEndpointRequest(idx, attemptSuccess, responseTimeMs);
 
 		if (attemptSuccess)
@@ -1951,11 +2009,12 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			{
 				uploadSpeedX = static_cast<double>(request.durationMs) / static_cast<double>(uploadElapsedMs);
 			}
-			logEventf("[Upload] ✅ Sent '%s' size=%lu bytes speed=%.2fx (elapsed %lums)\n",
+			logEventf("[Upload] ✅ Sent '%s' size=%lu bytes speed=%.2fx (elapsed %lums, response %lums)\n",
 					  uploadFileName.c_str(),
 					  static_cast<unsigned long>(fileSize),
 					  uploadSpeedX,
-					  static_cast<unsigned long>(uploadElapsedMs));
+					  static_cast<unsigned long>(uploadElapsedMs),
+					  static_cast<unsigned long>(responseTimeMs));
 
 			// Send upload success event
 			DynamicJsonDocument uploadEventData(512);

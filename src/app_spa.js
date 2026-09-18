@@ -63,6 +63,14 @@ function applyUiTheme(id, persist = true) {
     renderThemeControls();
 }
 
+function getThemeColor(variableName, fallback) {
+    const value = getComputedStyle(document.documentElement)
+        .getPropertyValue(variableName)
+        .trim();
+
+    return value || fallback;
+}
+
 function renderThemeControls() {
     const selector = document.getElementById('theme-selector');
     if (!selector) return;
@@ -72,6 +80,7 @@ function renderThemeControls() {
 }
 
 applyUiTheme(uiThemeState.selected || UI_THEME_DEFAULT, false);
+
 
 function applyDeviceCapabilities(deviceInfo) {
     if (!deviceInfo) return;
@@ -3420,11 +3429,11 @@ function drawVisualizerBackground(ctx, canvas) {
     const height = canvas.height;
     
     // Clear canvas with background
-    ctx.fillStyle = '#A4EDFF'; // Light blue background (matching the image)
+    ctx.fillStyle = getThemeColor('--ui-muted', '#cfbaaa');
     ctx.fillRect(0, 0, width, height);
     
     // Draw border
-    ctx.strokeStyle = '#0587C7';
+    ctx.strokeStyle = getThemeColor('--ui-border', '#6a3d28');
     ctx.lineWidth = 2;
     ctx.strokeRect(0, 0, width, height);
     
@@ -3457,11 +3466,11 @@ function drawVisualizerBackground(ctx, canvas) {
     ctx.font = '12px monospace';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#002942';
+    ctx.fillStyle = getThemeColor('--ui-surface', '#14110f');;
     
     for (const level of referenceLevels) {
         // Draw horizontal reference line
-        ctx.strokeStyle = level.value === 0 ? '#002942' : '#666';
+        ctx.strokeStyle = level.value === 0 ? getThemeColor('--ui-surface', '#14110f') : getThemeColor('--ui-text', '#fff1e8');
         ctx.lineWidth = level.value === 0 ? 2 : 1;
         ctx.setLineDash(level.value === 0 ? [] : [4, 4]);
         ctx.beginPath();
@@ -3504,7 +3513,7 @@ function updateLiveAudioVisualizer(samples) {
     const maxAmplitude = isInt16 ? 32767 : 1.0; // For 16-bit: max is 32767, for Float32: already normalized
     
     // Draw waveform
-    ctx.strokeStyle = '#800080'; // Purple color matching the image
+    ctx.strokeStyle = getThemeColor('--ui-panel', '#191412'); // Purple color matching the image
     ctx.lineWidth = 1;
     ctx.beginPath();
     
@@ -3546,7 +3555,7 @@ function updateLiveAudioVisualizer(samples) {
     ctx.stroke();
     
     // Draw waveform fill (semi-transparent)
-    ctx.fillStyle = 'rgba(5, 135, 199, 0.15)';
+    ctx.fillStyle = getThemeColor('--ui-border', '#6a3d28');
     ctx.lineTo(vizLeft + vizWidth, centerY);
     ctx.lineTo(vizLeft, centerY);
     ctx.closePath();

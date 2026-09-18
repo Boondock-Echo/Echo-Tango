@@ -71,7 +71,7 @@ namespace {
         network_incrementUploadAttempt();
 
         esp_task_wdt_reset();
-        bool uploadSuccess = uploadAudioFile(request, false);
+        bool uploadSuccess = uploadAudioFile(request, true);
         esp_task_wdt_reset();
 
         if (uploadSuccess)
@@ -232,7 +232,7 @@ bool handleUploadOne()
 
         esp_task_wdt_reset();
 
-        bool uploadSuccess = uploadAudioFile(request, false);
+        bool uploadSuccess = uploadAudioFile(request, true);
 
         esp_task_wdt_reset();
 
@@ -427,7 +427,7 @@ bool handleUploadOne()
 
     esp_task_wdt_reset();
 
-    bool uploadSuccess = uploadAudioFile(request, false);
+    bool uploadSuccess = uploadAudioFile(request, true);
 
     esp_task_wdt_reset();
 
