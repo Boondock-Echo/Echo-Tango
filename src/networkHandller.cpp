@@ -71,7 +71,7 @@ namespace {
         network_incrementUploadAttempt();
 
         esp_task_wdt_reset();
-        bool uploadSuccess = uploadAudioFile(request, false);
+        bool uploadSuccess = uploadAudioFile(request, true);
         esp_task_wdt_reset();
 
         if (uploadSuccess)
@@ -88,7 +88,10 @@ namespace {
         else
         {
             recorder_incrementErrorCount();
-            logWarnf("[UploadTask] upload failed reason=%s path=%s", network_getLastUploadFailureReason(), request.path);
+            // This branch is reached only after uploadAudioFile() made an
+            // attempt; token/endpoint cooldowns return before queue processing.
+            logWarnf("[UploadTask] upload failed reason=%s path=%s",
+                     network_getLastUploadFailureReason(), request.path);
 
             memEntry->uploadRetryCount++;
             if (memEntry->uploadRetryCount >= maxRetries)
@@ -183,6 +186,23 @@ bool handleUploadOne()
         return false;
     }
 
+    // Events bootstrap the short-lived Edge token. Leave every queued upload
+    // untouched until that bootstrap completes; the network task continues to
+    // drain events below while uploads are on hold.
+    if (!hasApiAuthToken())
+    {
+        logDebugf("[UploadTask] skip reason=waiting_for_api_token");
+        return false;
+    }
+
+    // A dead endpoint is a cooldown state, not a new upload failure. Do not
+    // dequeue/retry files or repeat old failure logs while recovery is pending.
+    if (network_areAllEndpointsDead())
+    {
+        logDebugf("[UploadTask] skip reason=waiting_for_endpoint_recovery");
+        return false;
+    }
+
     // =========================================================
     // PSRAM MODE
     // =========================================================
@@ -232,7 +252,7 @@ bool handleUploadOne()
 
         esp_task_wdt_reset();
 
-        bool uploadSuccess = uploadAudioFile(request, false);
+        bool uploadSuccess = uploadAudioFile(request, true);
 
         esp_task_wdt_reset();
 
@@ -250,7 +270,8 @@ bool handleUploadOne()
         else
         {
             recorder_incrementErrorCount();
-
+            // This branch is reached only after uploadAudioFile() made an
+            // attempt; token/endpoint cooldowns return before queue processing.
             logWarnf("[UploadTask] upload failed reason=%s path=%s",
                      network_getLastUploadFailureReason(), request.path);
 
@@ -427,7 +448,7 @@ bool handleUploadOne()
 
     esp_task_wdt_reset();
 
-    bool uploadSuccess = uploadAudioFile(request, false);
+    bool uploadSuccess = uploadAudioFile(request, true);
 
     esp_task_wdt_reset();
 
@@ -447,7 +468,8 @@ bool handleUploadOne()
     else
     {
         recorder_incrementErrorCount();
-
+        // This branch is reached only after uploadAudioFile() made an attempt;
+        // token/endpoint cooldowns return before selecting a filesystem file.
         logWarnf("[UploadTask] upload failed reason=%s path=%s",
                  network_getLastUploadFailureReason(), request.path);
 

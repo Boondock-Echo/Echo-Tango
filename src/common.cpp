@@ -2937,3 +2937,66 @@ bool recordings_isDayFolderPath(const String &canonicalPath)
     }
     return true;
 }
+
+namespace
+{
+    constexpr size_t kMaxApiAuthTokenLength = 2048;
+    char g_apiAuthToken[kMaxApiAuthTokenLength + 1] = {0};
+    portMUX_TYPE g_apiAuthTokenMux = portMUX_INITIALIZER_UNLOCKED;
+}
+
+bool setApiAuthToken(const char *token)
+{
+    if (token != nullptr && std::strlen(token) > kMaxApiAuthTokenLength)
+    {
+        return false;
+    }
+
+    portENTER_CRITICAL(&g_apiAuthTokenMux);
+    if (token == nullptr)
+    {
+        g_apiAuthToken[0] = '\0';
+    }
+    else
+    {
+        std::strncpy(g_apiAuthToken, token, kMaxApiAuthTokenLength);
+        g_apiAuthToken[kMaxApiAuthTokenLength] = '\0';
+    }
+    portEXIT_CRITICAL(&g_apiAuthTokenMux);
+    return true;
+}
+
+bool hasApiAuthToken()
+{
+    portENTER_CRITICAL(&g_apiAuthTokenMux);
+    const bool configured = g_apiAuthToken[0] != '\0';
+    portEXIT_CRITICAL(&g_apiAuthTokenMux);
+    return configured;
+}
+
+String getApiAuthToken()
+{
+    char token[kMaxApiAuthTokenLength + 1];
+    portENTER_CRITICAL(&g_apiAuthTokenMux);
+    std::strncpy(token, g_apiAuthToken, kMaxApiAuthTokenLength);
+    token[kMaxApiAuthTokenLength] = '\0';
+    portEXIT_CRITICAL(&g_apiAuthTokenMux);
+
+    if (token[0] == '\0')
+    {
+        return String();
+    }
+
+    return String(token);
+}
+
+String getApiAuthorizationHeader()
+{
+    const String token = getApiAuthToken();
+    if (token.isEmpty())
+    {
+        return String();
+    }
+
+    return String("Authorization: Bearer ") + token + "\r\n";
+}

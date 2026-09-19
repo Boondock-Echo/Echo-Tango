@@ -5,7 +5,7 @@
 #ifndef FIRMWARE_PREFIX
 #define FIRMWARE_PREFIX "TANGO"  // Default fallback
 #endif
-#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.01"
+#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.02a"
 #define CONFIG_VERSION "1.0.0"
 
 // Human-readable product name for UI (browser title, sidebar, API field "product")
@@ -57,10 +57,13 @@
 #define SYSTEM_ASSETS_CDN_BASE_PATH ""
 #endif
 
-// Upload timeouts (increase if uploads fail with "Upload timeout" or "Empty response" on slow links)
-#define UPLOAD_BODY_TIMEOUT_MS       60000UL  // Max time to send request body (45s; ~480KB @ ~11 KB/s)
-#define UPLOAD_TOTAL_TIMEOUT_MS     60000UL  // Max time for all endpoint attempts (60s)
-#define UPLOAD_RESPONSE_WAIT_MS      5000UL  // Max time to wait for HTTP response after body
+// Upload timeouts. The body deadline is expanded for large files using the minimum
+// expected throughput below; it is not a fixed whole-request deadline.
+#define UPLOAD_BODY_TIMEOUT_MS       60000UL  // Minimum time allowed to send a request body
+#define UPLOAD_MIN_BYTES_PER_SECOND   4096UL  // Extend body deadline for links slower than normal WiFi
+#define UPLOAD_WRITE_STALL_TIMEOUT_MS 10000UL // Abort only after this long without forward progress
+#define UPLOAD_TOTAL_TIMEOUT_MS      60000UL  // Minimum time for all endpoint attempts (expanded with body deadline)
+#define UPLOAD_RESPONSE_WAIT_MS      30000UL  // Max time to wait for HTTP response after body
 
 
 #define AUDIO_SAMPLE_BUFFERS 1024
@@ -132,7 +135,7 @@
 #define DEFAULT_LOG_SERIAL_FATAL true
 #define DEFAULT_LOG_SERIAL_ERROR true
 #define DEFAULT_LOG_SERIAL_WARNING true
-#define DEFAULT_LOG_SERIAL_INFO false
+#define DEFAULT_LOG_SERIAL_INFO true
 #define DEFAULT_LOG_SERIAL_DEBUG false
 #define DEFAULT_LOG_SERIAL_EVENT false
 // File: Fatal, Error, Warning, Info, Event enabled; Debug disabled

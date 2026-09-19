@@ -7,7 +7,7 @@
 #include <esp_wifi.h>
 #include <esp_task_wdt.h>
 #include <SD_MMC.h>
-#include <HTTPUpdate.h>
+#include <HTTPClient.h>
 #include <Update.h>
 #include <functional>
 #include <vector>
@@ -3382,6 +3382,13 @@ static void handleMainFirmwareCheck()
         apiError(mainWebServer, 503, API_ERR_HW_ERROR, "WiFi not connected");
         return;
     }
+
+    if (!hasApiAuthToken())
+    {
+        apiError(mainWebServer, 503, API_ERR_BUSY,
+                 "firmware check on hold; waiting for event API token");
+        return;
+    }
     
     // Choose a random healthy API endpoint for firmware check
     bool success = false;
@@ -3403,10 +3410,11 @@ static void handleMainFirmwareCheck()
         if (connectWiFiClientWithRetry(client, host, endpointPort, 1, 3000))
         {
             String requestLine = "GET " + requestPath + " HTTP/1.1";
-            String headers = "Host: " + String(host) + ":" + String(endpointPort) + "\r\n"
-                            "User-Agent: " + getUserAgentString() + "\r\n"
-                            "Accept: application/json\r\n"
-                            "Connection: close\r\n";
+            String headers = "Host: " + String(host) + ":" + String(endpointPort) + "\r\n";
+            headers += "User-Agent: " + String(getUserAgentString()) + "\r\n";
+            headers += getApiAuthorizationHeader();
+            headers += "Accept: application/json\r\n";
+            headers += "Connection: close\r\n";
             
             client.print(requestLine + "\r\n");
             client.print(headers);
@@ -3533,9 +3541,6 @@ static void handleMainFirmwareApply()
         return;
     }
     
-    // Use HTTPUpdate to download and apply firmware
-    httpUpdate.rebootOnUpdate(true);
-    
     // Construct full URL
     String fullUrl = "http://" + host;
     if (port != 80)
@@ -3544,35 +3549,89 @@ static void handleMainFirmwareApply()
     }
     fullUrl += path;
     
-    WiFiClient client;
-    t_httpUpdate_return ret = httpUpdate.update(client, fullUrl);
-    
-    switch (ret)
+    const String apiToken = getApiAuthToken();
+    if (apiToken.isEmpty())
     {
-        case HTTP_UPDATE_FAILED:
-            apiError(mainWebServer, 500, API_ERR_INTERNAL,
-                     "update failed: " + String(httpUpdate.getLastErrorString()));
-            break;
-        case HTTP_UPDATE_NO_UPDATES:
-            apiError(mainWebServer, 500, API_ERR_NOT_FOUND, "no updates available");
-            break;
-        case HTTP_UPDATE_OK:
+        apiError(mainWebServer, 401, API_ERR_INTERNAL,
+                 "no Edge API token available; send an event before applying firmware");
+        return;
+    }
+
+    WiFiClient client;
+    HTTPClient http;
+    http.setTimeout(60000);
+    if (!http.begin(client, fullUrl))
+    {
+        apiError(mainWebServer, 500, API_ERR_INTERNAL, "could not open firmware download URL");
+        return;
+    }
+    http.addHeader("Authorization", "Bearer " + apiToken);
+
+    esp_task_wdt_reset();
+    const int httpCode = http.GET();
+    esp_task_wdt_reset();
+    if (httpCode != HTTP_CODE_OK)
+    {
+        http.end();
+        apiError(mainWebServer, httpCode == 401 ? 401 : 500,
+                 API_ERR_INTERNAL, "firmware download returned HTTP " + String(httpCode));
+        return;
+    }
+
+    const int contentLength = http.getSize();
+    if (contentLength <= 0 || !Update.begin(static_cast<size_t>(contentLength)))
+    {
+        http.end();
+        apiError(mainWebServer, 500, API_ERR_INTERNAL, "could not begin firmware update");
+        return;
+    }
+
+    WiFiClient *stream = http.getStreamPtr();
+    size_t writtenTotal = 0;
+    uint8_t buffer[1024];
+    unsigned long lastDataMs = millis();
+    while (writtenTotal < static_cast<size_t>(contentLength))
+    {
+        const int available = stream->available();
+        if (available > 0)
         {
-            DynamicJsonDocument doc(256);
-            doc["message"] = "Update started, device will reboot";
-            apiOk(mainWebServer, doc);
+            const size_t toRead = std::min(static_cast<size_t>(available), sizeof(buffer));
+            const int bytesRead = stream->readBytes(reinterpret_cast<char *>(buffer), toRead);
+            if (bytesRead <= 0)
+                break;
+            const size_t written = Update.write(buffer, static_cast<size_t>(bytesRead));
+            if (written != static_cast<size_t>(bytesRead))
+                break;
+            writtenTotal += written;
+            lastDataMs = millis();
+            esp_task_wdt_reset();
+        }
+        else if (!http.connected() || (millis() - lastDataMs) > 15000UL)
+        {
             break;
         }
-        default:
-            apiError(mainWebServer, 500, API_ERR_INTERNAL, "unknown update error");
-            break;
+        else
+        {
+            delay(10);
+        }
     }
-    
-    if (ret == HTTP_UPDATE_OK)
+
+    http.end();
+    const bool updateOk = writtenTotal == static_cast<size_t>(contentLength) &&
+                          Update.end() && Update.isFinished();
+    if (!updateOk)
     {
-        delay(1000);
-        ESP.restart();
+        Update.abort();
+        apiError(mainWebServer, 500, API_ERR_INTERNAL,
+                 "firmware download or flash failed after " + String(writtenTotal) + " bytes");
+        return;
     }
+
+    DynamicJsonDocument doc(256);
+    doc["message"] = "Update complete, device will reboot";
+    apiOk(mainWebServer, doc);
+    delay(1000);
+    ESP.restart();
 }
 
 // WebSocket push functions

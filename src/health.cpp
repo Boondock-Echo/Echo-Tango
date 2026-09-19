@@ -552,7 +552,8 @@ void maintenanceTask(void *pvParameters)
         // Only attempt once after WiFi is connected and time is valid.
         // Mark as attempted regardless of success/failure to prevent retries.
         // Also check WiFi.status() for more reliable connection detection
-        if (!settingsPulledAfterOnline && isWiFiConnected() && WiFi.status() == WL_CONNECTED && timeKeeper().timeIsValid())
+        if (!settingsPulledAfterOnline && isWiFiConnected() && WiFi.status() == WL_CONNECTED &&
+            timeKeeper().timeIsValid() && hasApiAuthToken())
         {
             // Mark as attempted immediately to prevent retries
             settingsPulledAfterOnline = true;
