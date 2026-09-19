@@ -289,6 +289,7 @@ namespace
 	// Rate limiting for event sending failures
 	unsigned long lastEventSendFailedLogMs = 0;					   // Last time event send failure was logged
 	bool lastEventSendFailedState = false;						   // Previous state of event send failure
+	bool eventTokenMissingResponseLogged = false;
 	constexpr unsigned long kEventErrorLogIntervalMs = 30000;	   // Log errors at most every 30 seconds
 	constexpr unsigned long kEventStateChangeLogIntervalMs = 1000; // Log state changes immediately (1 second debounce)
 
@@ -1301,6 +1302,11 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 		// Don't send event here - WiFi is not connected, so event would fail anyway
 		return false;
 	}
+	if (!hasApiAuthToken())
+	{
+		setUploadFailureReason("waiting_for_api_token");
+		return false;
+	}
 
 	ensureApiEndpoints();
 
@@ -1685,15 +1691,13 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			String hostHeader = String(endpoint.host) + ":" + String(endpointPort);
 
 			String requestLine = "POST " + uploadUrl + " HTTP/1.1";
-			String headers = "Host: " + hostHeader + "\r\n"
-													 "User-Agent: " +
-							 getUserAgentString() + "\r\n"
-													"Accept: application/json\r\n"
-													"Content-Type: multipart/form-data; boundary=" +
-							 boundary + "\r\n"
-										"Content-Length: " +
-							 String(static_cast<unsigned long>(contentLength)) + "\r\n"
-																				 "Connection: close\r\n";
+			String headers = "Host: " + hostHeader + "\r\n";
+			headers += "User-Agent: " + String(getUserAgentString()) + "\r\n";
+			headers += getApiAuthorizationHeader();
+			headers += "Accept: application/json\r\n";
+			headers += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+			headers += "Content-Length: " + String(static_cast<unsigned long>(contentLength)) + "\r\n";
+			headers += "Connection: close\r\n";
 
 			// Stable across retries; the edge/API must deduplicate this key.
 			headers += "Idempotency-Key: " + deviceId + ":" + uploadFileName + ":" + String(fileSize) + "\r\n";
@@ -2128,6 +2132,10 @@ bool uploadLogFile(const String &logFilePath)
 	{
 		return false;
 	}
+	if (!hasApiAuthToken())
+	{
+		return false;
+	}
 
 	ensureApiEndpoints();
 
@@ -2290,15 +2298,13 @@ bool uploadLogFile(const String &logFilePath)
 			String hostHeader = String(endpoint.host) + ":" + String(endpointPort);
 
 			String requestLine = "POST " + uploadUrl + " HTTP/1.1";
-			String headers = "Host: " + hostHeader + "\r\n"
-													 "User-Agent: " +
-							 getUserAgentString() + "\r\n"
-													"Accept: application/json\r\n"
-													"Content-Type: multipart/form-data; boundary=" +
-							 boundary + "\r\n"
-										"Content-Length: " +
-							 String(static_cast<unsigned long>(contentLength)) + "\r\n"
-																				 "Connection: close\r\n";
+			String headers = "Host: " + hostHeader + "\r\n";
+			headers += "User-Agent: " + String(getUserAgentString()) + "\r\n";
+			headers += getApiAuthorizationHeader();
+			headers += "Accept: application/json\r\n";
+			headers += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+			headers += "Content-Length: " + String(static_cast<unsigned long>(contentLength)) + "\r\n";
+			headers += "Connection: close\r\n";
 
 			clientPtr->print(requestLine + "\r\n");
 			clientPtr->print(headers);
@@ -2457,6 +2463,11 @@ bool network_pushSettingsToServer(const String &settingsJson)
 	{
 		return false;
 	}
+	if (!hasApiAuthToken())
+	{
+		logDebugf("[Settings] Push on hold - waiting for event API token");
+		return false;
+	}
 
 	ensureApiEndpoints();
 
@@ -2520,15 +2531,13 @@ bool network_pushSettingsToServer(const String &settingsJson)
 		logDebugf("[Settings] Connected to endpoint %zu for settings push", idx);
 
 		String requestLine = "POST /api/v1/settings HTTP/1.1";
-		String headers = "Host: " + String(endpoint.host) + ":" + String(endpointPort) + "\r\n"
-																						 "User-Agent: " +
-						 getUserAgentString() + "\r\n"
-												"Accept: application/json\r\n"
-												"Content-Type: multipart/form-data; boundary=" +
-						 boundary + "\r\n"
-									"Content-Length: " +
-						 String(static_cast<unsigned long>(contentLength)) + "\r\n"
-																			 "Connection: close\r\n";
+		String headers = "Host: " + String(endpoint.host) + ":" + String(endpointPort) + "\r\n";
+		headers += "User-Agent: " + String(getUserAgentString()) + "\r\n";
+		headers += getApiAuthorizationHeader();
+		headers += "Accept: application/json\r\n";
+		headers += "Content-Type: multipart/form-data; boundary=" + boundary + "\r\n";
+		headers += "Content-Length: " + String(static_cast<unsigned long>(contentLength)) + "\r\n";
+		headers += "Connection: close\r\n";
 
 		client.print(requestLine + "\r\n");
 		client.print(headers);
@@ -2644,6 +2653,11 @@ bool network_pullSettingsFromServer(String &outSettingsJson)
 				  WiFi.isConnected(), WiFi.status());
 		return false;
 	}
+	if (!hasApiAuthToken())
+	{
+		logDebugf("[Settings] Pull on hold - waiting for event API token");
+		return false;
+	}
 
 	ensureApiEndpoints();
 
@@ -2693,11 +2707,11 @@ bool network_pullSettingsFromServer(String &outSettingsJson)
 
 		String requestPath = "/api/v1/settings/" + deviceId;
 		String requestLine = "GET " + requestPath + " HTTP/1.1";
-		String headers = "Host: " + String(endpoint.host) + ":" + String(endpointPort) + "\r\n"
-																						 "User-Agent: " +
-						 getUserAgentString() + "\r\n"
-												"Accept: application/json\r\n"
-												"Connection: close\r\n";
+		String headers = "Host: " + String(endpoint.host) + ":" + String(endpointPort) + "\r\n";
+		headers += "User-Agent: " + String(getUserAgentString()) + "\r\n";
+		headers += getApiAuthorizationHeader();
+		headers += "Accept: application/json\r\n";
+		headers += "Connection: close\r\n";
 
 		client.print(requestLine + "\r\n");
 		client.print(headers);
@@ -3235,14 +3249,13 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 		logDebugf("[Event] Connected to endpoint %zu for event: %s",
 				  idx, entry.eventType);
 		String requestLine = "POST " + String(DEFAULT_EVENT_PATH) + " HTTP/1.1";
-		String headers = "Host: " + String(endpoint.host) + ":" + String(endpointPort) + "\r\n"
-																						 "User-Agent: " +
-						 getUserAgentString() + "\r\n"
-												"Accept: application/json\r\n"
-												"Content-Type: application/json\r\n"
-												"Content-Length: " +
-						 String(jsonPayload.length()) + "\r\n"
-														"Connection: close\r\n";
+		String headers = "Host: " + String(endpoint.host) + ":" + String(endpointPort) + "\r\n";
+		headers += "User-Agent: " + String(getUserAgentString()) + "\r\n";
+		headers += getApiAuthorizationHeader();
+		headers += "Accept: application/json\r\n";
+		headers += "Content-Type: application/json\r\n";
+		headers += "Content-Length: " + String(jsonPayload.length()) + "\r\n";
+		headers += "Connection: close\r\n";
 		client.print(requestLine + "\r\n");
 		client.print(headers);
 		client.print("\r\n");
@@ -3304,10 +3317,23 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 			{
 				if (!body.isEmpty())
 				{
-					DynamicJsonDocument responseDoc(512);
+					DynamicJsonDocument responseDoc(3072);
 					DeserializationError jsonError = deserializeJson(responseDoc, body);
 					if (jsonError == DeserializationError::Ok)
 					{
+						const char *authToken = responseDoc["token"].as<const char *>();
+						if (authToken != nullptr && authToken[0] != '\0')
+						{
+							if (setApiAuthToken(authToken))
+							{
+								eventTokenMissingResponseLogged = false;
+								logWarnf("[Event] API bearer token stored/refreshed");
+							}
+							else
+							{
+								logWarnf("[Event] API bearer token exceeds device limit; ignoring it");
+							}
+						}
 						syncClockFromApiResponse(body);
 						const char *message = responseDoc["message"] | "";
 						bool hasSuccessMessage = (strstr(message, "Event received") != nullptr ||
@@ -3349,7 +3375,7 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 					unsigned long responseTimeMs = millis() - attemptStartMs;
 					network_recordEndpointRequest(idx, true, responseTimeMs);
 					network_updateEndpointHealthScore(idx);
-					logDebugf("[Network] Event sent (status=%d, empty body, response_time=%lums)\n",
+					logWarnf("[Network] Event sent (status=%d, empty body, response_time=%lums)\n",
 							  statusCode, responseTimeMs);
 					break;
 				}

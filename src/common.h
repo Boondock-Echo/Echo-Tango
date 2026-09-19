@@ -67,6 +67,17 @@ float calculateDb(const int16_t *samples, size_t sampleCount);
 float calculateAudioLevel(const int16_t *samples, size_t sampleCount);
 int16_t calculatePeakSample(const int16_t *samples, size_t sampleCount, float &utilizationPercent);
 String analyzeServerResponse(const String &response);
+// Stores the short-lived bearer token returned by the events API. The token is
+// intentionally RAM-only and is reacquired after every reboot.
+bool setApiAuthToken(const char *token);
+// Reports token presence without exposing or copying the credential.
+bool hasApiAuthToken();
+// Returns only the current token value for clients such as HTTPClient that add
+// the header name themselves. Empty until an event response supplies a token.
+String getApiAuthToken();
+// Returns a complete HTTP Authorization header for the current API token, or an
+// empty string before the events API has supplied one. Includes the trailing CRLF.
+String getApiAuthorizationHeader();
 String formatIsoTimestamp(time_t epochSeconds, unsigned long recordedAtMs);
 String formatIsoTimestampWithMs(time_t epochSeconds, unsigned long recordedAtMs);
 String getFormattedTimeWithTimezone(); // Returns "HH:MM:SS" with timezone offset applied

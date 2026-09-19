@@ -5,7 +5,7 @@
 #ifndef FIRMWARE_PREFIX
 #define FIRMWARE_PREFIX "TANGO"  // Default fallback
 #endif
-#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.01"
+#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.02a"
 #define CONFIG_VERSION "1.0.0"
 
 // Human-readable product name for UI (browser title, sidebar, API field "product")
@@ -135,7 +135,7 @@
 #define DEFAULT_LOG_SERIAL_FATAL true
 #define DEFAULT_LOG_SERIAL_ERROR true
 #define DEFAULT_LOG_SERIAL_WARNING true
-#define DEFAULT_LOG_SERIAL_INFO false
+#define DEFAULT_LOG_SERIAL_INFO true
 #define DEFAULT_LOG_SERIAL_DEBUG false
 #define DEFAULT_LOG_SERIAL_EVENT false
 // File: Fatal, Error, Warning, Info, Event enabled; Debug disabled
