@@ -2,6 +2,8 @@
 
 This document suggests how to **reduce SD reads and writes** (wear, latency, and contention with recording/uploads). It complements [SD_CARD_RECORDING_RECOMMENDATIONS.md](./SD_CARD_RECORDING_RECOMMENDATIONS.md) (queue/upload architecture) and [SD_CARD_RECORDING_ANALYSIS.md](./SD_CARD_RECORDING_ANALYSIS.md) (recorder write-path reliability).
 
+**Task safety** (who may talk to the card at once) is documented separately in [SD_BUS_LOCK.md](./SD_BUS_LOCK.md). Do not call `SD_MMC` directly from `src/`; use `sd_bus`.
+
 **Goal:** fewer filesystem operations for the same functionality, with explicit tradeoffs where durability or freshness would change.
 
 ---
@@ -26,8 +28,8 @@ This document suggests how to **reduce SD reads and writes** (wear, latency, and
 
 | Item | Behavior |
 |------|------------|
-| **Hot path vs filesystem fallback** | Upload task still drains the **SPIRAM basename queue** first. **Filesystem** `uploadQueue_getNextFile()` runs only when the memory queue is empty. **Rate limit:** if that scan finds **no** `.wav`, the next full-tree scan is deferred **5 s** (`kFsFallbackEmptyScanMinIntervalMs` in [`main.cpp`](../src/main.cpp)); finding a file or successfully dequeuing from the memory queue clears the deferral so backlogs drain quickly. |
-| **Pending `.wav` count cache** | `uploadQueue_getPendingCount()` returns a **cached** recursive count for **2 s** (`kFsPendingWavCountCacheTtlMs` in [`upload_queue.cpp`](../src/upload_queue.cpp)) unless **`uploadQueue_invalidateFilesystemPendingCountCache()`** runs. Invalidate on **upload complete** (`markUploaded` / `markUploadedWithRecord`), **`uploadQueue_begin`**, and **recorder finalize** when a `/pending` **`.wav`** is created or a small-file discard removes one. Memory-queue slot count (`sdCardMemoryQueue_getPendingCount`) is always computed live in `system_getUploadQueueSize()`. |
+| **Per-day `upload_list` + `upload_list.idx`** | Names append to `/pending/YYYY/MM/DD/upload_list`; `upload_list.idx` is the next line to upload (incremented on success, no list rewrite). `uploadQueue_getNextFile()` reads from the index (**newest day first**). Empty-list polls are deferred **5 s**. See [PENDING_UPLOAD_LIST.md](./PENDING_UPLOAD_LIST.md). |
+| **Pending count cache** | `uploadQueue_getPendingCount()` counts non-empty `upload_list` lines at or after each day's index and caches the result for **2 s** unless **`uploadQueue_invalidateFilesystemPendingCountCache()`** runs (add, successful upload, begin, recorder pending-tree change). |
 
 **API:** `void uploadQueue_invalidateFilesystemPendingCountCache()` in [`upload_queue.h`](../src/upload_queue.h).
 
@@ -90,9 +92,10 @@ This document suggests how to **reduce SD reads and writes** (wear, latency, and
 
 | Area | Files |
 |------|--------|
+| SD bus lock (all card I/O) | `src/sd_bus.cpp`, [SD_BUS_LOCK.md](./SD_BUS_LOCK.md) |
 | Recorder writes / flush | `src/recorder.cpp` |
 | Pending / inbox / index | `src/upload_queue.cpp` |
-| Upload task opens | `src/main.cpp`, `src/network.cpp` |
+| Upload task opens | `src/networkHandller.cpp`, `src/network.cpp` |
 | Logs | `src/logger.cpp` |
 | Summaries / prune / inbox | `src/common.cpp` |
 | Web recordings API | `src/boondock_server.cpp` |

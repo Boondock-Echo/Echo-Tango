@@ -2,7 +2,7 @@
 
 #include <HTTPClient.h>
 #include <ESPmDNS.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <esp_wifi.h>
@@ -33,10 +33,6 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/queue.h>
-
-#include <WiFi.h>
-
-void sendEvent(const String &type, const String &message, JsonObject *settings);
 
 namespace
 {
@@ -103,7 +99,7 @@ namespace
 
 bool cloudPathMonitoringPaused()
 {
-	if (networkHandler_isUploadPaused())
+	if (networkHandler_isUploadPaused() || networkHandler_isUploading())
 	{
 		return true;
 	}
@@ -174,9 +170,6 @@ bool network_isCloudPathOk()
 	return g_cloudPathConsecutiveFailures == 0;
 }
 
-bool network_getRandomHealthyEndpoint(size_t &indexOut, const char *&hostOut, uint16_t &portOut);
-void network_reconnectWiFi();
-
 // Mutex timeout tracking (file scope for access from other files)
 MutexMetrics g_mutexMetrics = {};
 
@@ -241,7 +234,7 @@ namespace
 	};
 	DeferredWiFiEvent deferredWiFiEvent = {};
 
-	constexpr size_t kUploadChunkSize = 4096;
+	constexpr size_t kUploadChunkSize = UPLOAD_TCP_CHUNK_SIZE;
 	uint8_t uploadBuffer[kUploadChunkSize];
 
 	SemaphoreHandle_t uploadMutex = nullptr;
@@ -289,7 +282,6 @@ namespace
 	// Rate limiting for event sending failures
 	unsigned long lastEventSendFailedLogMs = 0;					   // Last time event send failure was logged
 	bool lastEventSendFailedState = false;						   // Previous state of event send failure
-	bool eventTokenMissingResponseLogged = false;
 	constexpr unsigned long kEventErrorLogIntervalMs = 30000;	   // Log errors at most every 30 seconds
 	constexpr unsigned long kEventStateChangeLogIntervalMs = 1000; // Log state changes immediately (1 second debounce)
 
@@ -373,9 +365,7 @@ namespace
 		return userAgentBuffer;
 	}
 
-	static constexpr uint32_t kUploadChunksPerYield = 4u;
-
-		static unsigned long uploadBodyTimeoutMs(size_t contentLength)
+	static unsigned long uploadBodyTimeoutMs(size_t contentLength)
 	{
 		const uint64_t estimatedMs =
 			(static_cast<uint64_t>(contentLength) * 1000ULL + UPLOAD_MIN_BYTES_PER_SECOND - 1ULL) /
@@ -383,37 +373,6 @@ namespace
 		return estimatedMs > UPLOAD_BODY_TIMEOUT_MS ? static_cast<unsigned long>(estimatedMs) : UPLOAD_BODY_TIMEOUT_MS;
 	}
 
-	// A socket write may accept fewer bytes than requested. Retry the remainder so
-	// Content-Length always matches the body received by the edge.
-	static bool writeUploadBytes(WiFiClient &client, const uint8_t *data, size_t length,
-								 unsigned long bodyStartMs, unsigned long bodyTimeoutMs,
-								 size_t &bodyBytesSent)
-	{
-		size_t offset = 0;
-		unsigned long lastProgressMs = millis();
-		while (offset < length)
-		{
-			const unsigned long now = millis();
-			if ((now - bodyStartMs) >= bodyTimeoutMs ||
-				(now - lastProgressMs) >= UPLOAD_WRITE_STALL_TIMEOUT_MS || !client.connected())
-			{
-				return false;
-			}
-			const size_t written = client.write(data + offset, length - offset);
-			if (written > 0)
-			{
-				offset += written;
-				bodyBytesSent += written;
-				lastProgressMs = millis();
-			}
-			else
-			{
-				vTaskDelay(1);
-			}
-			esp_task_wdt_reset();
-		}
-		return true;
-	}
 
 	// Exponential backoff between TCP retries; always brief cooldown after final failure (incl. maxRetries=1).
 	static void delayAfterTcpConnectFailure(uint8_t attempt, uint8_t maxRetries)
@@ -449,7 +408,6 @@ namespace
 		// Set shorter timeout to prevent long blocking calls (1 second max per attempt)
 		client.setTimeout(connectionTimeoutMs);
 
-		unsigned long connectionStartMs = millis();
 		for (uint8_t attempt = 0; attempt < maxRetries; ++attempt)
 		{
 			// Feed watchdog before connection attempt
@@ -732,7 +690,7 @@ namespace
 
 	void cloudPathMaybeRecover(unsigned long nowMs)
 	{
-		if (!WiFi.isConnected() || WiFi.status() != WL_CONNECTED)
+		if (!WiFi.isConnected() || WiFi.status() != WL_CONNECTED || networkHandler_isUploading())
 		{
 			return;
 		}
@@ -1291,6 +1249,75 @@ const char *network_getLastUploadFailureReason()
 	return g_lastUploadFailureReason;
 }
 
+// Send the upload buffer over TCP, handling partial writes and transient write failures.
+static bool writeUploadBuffer(WiFiClient *client, const uint8_t *data, size_t len)
+{
+	if (client == nullptr || data == nullptr || len == 0)
+	{
+		return true;
+	}
+
+	size_t offset = 0;
+	while (offset < len)
+	{
+		esp_task_wdt_reset();
+
+		const size_t toWrite = len - offset;
+		const int written = static_cast<int>(client->write(data + offset, toWrite));
+
+		if (written < 0)
+		{
+			logWarnf("[Upload] WiFiClient write returned %d, aborting immediately\n", written);
+			return false;
+		}
+
+		if (written == 0)
+		{
+			bool sent = false;
+			for (int retry = 0; retry < 3; ++retry)
+			{
+				const int retryWritten = static_cast<int>(client->write(data + offset, toWrite));
+				if (retryWritten < 0)
+				{
+					logWarnf("[Upload] WiFiClient write returned %d on retry, aborting immediately\n", retryWritten);
+					return false;
+				}
+				if (retryWritten > 0)
+				{
+					offset += static_cast<size_t>(retryWritten);
+					sent = true;
+					break;
+				}
+				esp_task_wdt_reset();
+			}
+			if (!sent)
+			{
+				logWarnf("[Upload] WiFiClient write returned 0 after 3 retries, aborting\n");
+				return false;
+			}
+			continue;
+		}
+
+		offset += static_cast<size_t>(written);
+	}
+
+	return true;
+}
+
+// Hard-drop a stalled upload socket. Never write more bytes (closing boundary, etc.)
+// after a timeout — print/write/stop can block past the 30s task WDT.
+static void dropUploadClient(WiFiClient *client)
+{
+	if (client == nullptr)
+	{
+		return;
+	}
+	esp_task_wdt_reset();
+	client->setTimeout(250);
+	client->stop();
+	esp_task_wdt_reset();
+}
+
 bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 {
 	ensureUploadResources();
@@ -1369,9 +1396,13 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 		if (!isStorageModeSdCard())
 		{
 			setUploadFailureReason("sd_unavailable");
+			if (uploadMutex != nullptr)
+			{
+				xSemaphoreGive(uploadMutex);
+			}
 			return false;
 		}
-		File fileProbe = SD_MMC.open(sourcePath, FILE_READ);
+		sd_bus::SdFile fileProbe = sd_bus::open(sourcePath, FILE_READ);
 		if (!fileProbe)
 		{
 			// Record storage read error
@@ -1407,7 +1438,7 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 					String newPath = baseDir + "/" + String(timePart);
 
 					// Try the new path
-					File newFileProbe = SD_MMC.open(newPath, FILE_READ);
+					sd_bus::SdFile newFileProbe = sd_bus::open(newPath, FILE_READ);
 					if (newFileProbe)
 					{
 						sourcePath = newPath;
@@ -1418,15 +1449,15 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 					{
 						// New path doesn't exist either, try to find any file in /queue with matching size
 						// This is a fallback in case the rename happened differently
-						if (isStorageModeSdCard() && SD_MMC.exists("/queue"))
+						if (isStorageModeSdCard() && sd_bus::exists("/queue"))
 						{
-							File queueDir = SD_MMC.open("/queue");
+							sd_bus::SdFile queueDir = sd_bus::open("/queue");
 							if (queueDir && queueDir.isDirectory())
 							{
 								bool found = false;
 								while (true)
 								{
-									File entry = queueDir.openNextFile();
+									sd_bus::SdFile entry = queueDir.openNextFile();
 									if (!entry)
 									{
 										break;
@@ -1542,12 +1573,39 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 		uploadFileName = "audio.wav";
 	}
 
-	const String isoTimestamp = formatIsoTimestamp(request.recordedAtEpoch, request.recordedAtMs);
+	// TO-DO Should this be on the device or in the API
+	// Timestamp from filename (2026-09-07-06-27-23.wav -> 2026-09-07T06:27:23Z); fallback if unparseable.
+	String isoTimestamp;
+	{
+		int y = 0, mo = 0, d = 0, hh = 0, mm = 0, ss = 0;
+		unsigned long sfx = 0;
+		if (std::sscanf(uploadFileName.c_str(), "%d-%d-%d-%d-%d-%d_%lu.wav", &y, &mo, &d, &hh, &mm, &ss, &sfx) == 7 ||
+			std::sscanf(uploadFileName.c_str(), "%d-%d-%d-%d-%d-%d.wav", &y, &mo, &d, &hh, &mm, &ss) == 6)
+		{
+			char buf[32];
+			std::snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ", y, mo, d, hh, mm, ss);
+			isoTimestamp = String(buf);
+		}
+	}
+	if (isoTimestamp.isEmpty())
+	{
+		isoTimestamp = formatIsoTimestamp(request.recordedAtEpoch, request.recordedAtMs);
+	}
+
+	// convertToMp3 will be set per-endpoint in the loop below
 
 	// These parts are common for all endpoints
 	String macPart = "--" + boundary + lineBreak +
 					 "Content-Disposition: form-data; name=\"mac_address\"" + lineBreak + lineBreak +
 					 deviceId + lineBreak;
+
+	String filenamePart = "--" + boundary + lineBreak +
+						  "Content-Disposition: form-data; name=\"filename\"" + lineBreak + lineBreak +
+						  uploadFileName + lineBreak;
+
+	String timestampPart = "--" + boundary + lineBreak +
+						   "Content-Disposition: form-data; name=\"timestamp\"" + lineBreak + lineBreak +
+						   isoTimestamp + lineBreak;
 
 	String tagsPart;
 	if (sendTags)
@@ -1640,7 +1698,7 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 
 		const unsigned long attemptStartMs = millis();
 
-		File audioFile;
+		sd_bus::SdFile audioFile;
 		if (!request.isPsramMode)
 		{
 			// SD card mode: open file (use updated sourcePath if file was renamed)
@@ -1648,7 +1706,7 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			{
 				break;
 			}
-			audioFile = SD_MMC.open(sourcePath, FILE_READ);
+			audioFile = sd_bus::open(sourcePath, FILE_READ);
 			if (!audioFile)
 			{
 				sendEvent("audio_upload_failed", "{\"reason\":\"file_open\",\"path\":\"" + sourcePath + "\"}");
@@ -1661,9 +1719,9 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 		clientPtr->stop();
 
 		// Calculate content length for this endpoint
-		const size_t contentLength = macPart.length() +
-									 (sendTags ? tagsPart.length() : 0) +
-									 fileHeader.length() + closing.length() + fileSize;
+		const size_t contentLength = macPart.length() + filenamePart.length() +
+				timestampPart.length() + (sendTags ? tagsPart.length() : 0) +
+				fileHeader.length() + closing.length() + fileSize;
 
 		bool attemptSuccess = true;
 		String attemptError;
@@ -1707,6 +1765,8 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			clientPtr->print("\r\n");
 
 			clientPtr->print(macPart);
+			clientPtr->print(filenamePart);
+			clientPtr->print(timestampPart);
 			if (sendTags)
 			{
 				clientPtr->print(tagsPart);
@@ -1714,41 +1774,44 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			clientPtr->print(fileHeader);
 
 			// Upload audio data
-			size_t bodyBytesSent = 0;
-			bool bodyComplete = true;
-			unsigned long uploadStartMs = millis();
+			const unsigned long bodySendStartMs = millis();
+			bool bodySendOk = true;
+			const char *bodyFailReason = nullptr;
+
+			auto failBodySend = [&](const char *reason) {
+				bodySendOk = false;
+				bodyFailReason = reason;
+				attemptSuccess = false;
+				attemptError = reason;
+			};
+
 			if (request.isPsramMode && request.psramData != nullptr)
 			{
 				// PSRAM mode: upload from memory buffer
 				size_t remaining = fileSize;
 				const uint8_t *dataPtr = request.psramData;
-				uint32_t chunkCount = 0;
-				uint32_t yieldCount = 0;
-				unsigned long lastWatchdogFeedMs = millis();
-				while (remaining > 0)
+				while (remaining > 0 && bodySendOk)
 				{
+					esp_task_wdt_reset();
+
 					size_t chunkSize = (remaining > sizeof(uploadBuffer)) ? sizeof(uploadBuffer) : remaining;
 					std::memcpy(uploadBuffer, dataPtr, chunkSize);
-					if (!writeUploadBytes(*clientPtr, uploadBuffer, chunkSize, uploadStartMs, bodyTimeoutMs, bodyBytesSent))
+					if (!writeUploadBuffer(clientPtr, uploadBuffer, chunkSize))
 					{
-						bodyComplete = false;
+						failBodySend("tcp_write_failed");
 						break;
 					}
 					dataPtr += chunkSize;
 					remaining -= chunkSize;
 
-					if ((++yieldCount & (kUploadChunksPerYield - 1u)) == 0u)
-					{
-						vTaskDelay(1);
-					}
-
-					// Feed watchdog more frequently: every 20 chunks OR every 500ms (whichever comes first)
 					unsigned long now = millis();
-					if (++chunkCount >= 20 || (now - lastWatchdogFeedMs) >= 500)
+					if ((now - bodySendStartMs) > UPLOAD_BODY_TIMEOUT_MS ||
+						(now - uploadStartMs) >= kMaxTotalUploadTimeMs)
 					{
-						esp_task_wdt_reset();
-						chunkCount = 0;
-						lastWatchdogFeedMs = now;
+						logWarnf("[Upload] Upload timeout after %lu seconds, aborting\n",
+								 static_cast<unsigned long>(UPLOAD_BODY_TIMEOUT_MS / 1000));
+						failBodySend("upload_timeout");
+						break;
 					}
 				}
 			}
@@ -1756,37 +1819,31 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 			{
 				// SD card mode: upload from file
 				size_t bytesRead = 0;
-				uint32_t chunkCount = 0;
-				uint32_t yieldCount = 0;
-				unsigned long lastWatchdogFeedMs = millis();
-				while ((bytesRead = audioFile.read(uploadBuffer, sizeof(uploadBuffer))) > 0)
+				while (bodySendOk && (bytesRead = audioFile.read(uploadBuffer, sizeof(uploadBuffer))) > 0)
 				{
-					if (!writeUploadBytes(*clientPtr, uploadBuffer, bytesRead, uploadStartMs, bodyTimeoutMs, bodyBytesSent))
+					esp_task_wdt_reset();
+
+					if (!writeUploadBuffer(clientPtr, uploadBuffer, bytesRead))
 					{
-						bodyComplete = false;
+						failBodySend("tcp_write_failed");
 						break;
 					}
 
-					if ((++yieldCount & (kUploadChunksPerYield - 1u)) == 0u)
-					{
-						vTaskDelay(1);
-					}
-
-					// Feed watchdog more frequently: every 20 chunks OR every 500ms (whichever comes first)
 					unsigned long now = millis();
-					if (++chunkCount >= 20 || (now - lastWatchdogFeedMs) >= 500)
+					if ((now - bodySendStartMs) > UPLOAD_BODY_TIMEOUT_MS ||
+						(now - uploadStartMs) >= kMaxTotalUploadTimeMs)
 					{
-						esp_task_wdt_reset();
-						chunkCount = 0;
-						lastWatchdogFeedMs = now;
+						logWarnf("[Upload] Upload timeout after %lu seconds, aborting\n",
+								 static_cast<unsigned long>(UPLOAD_BODY_TIMEOUT_MS / 1000));
+						failBodySend("upload_timeout");
+						break;
 					}
-
 				}
-				// Check for read errors (bytesRead == 0 but file not at end)
-				if (bytesRead == 0 && audioFile.available() > 0)
+				if (bodySendOk && bytesRead == 0 && audioFile.available() > 0)
 				{
 					extern void storage_recordReadError();
 					storage_recordReadError();
+					failBodySend("sd_read_failed");
 				}
 				if (audioFile)
 				{
@@ -1794,127 +1851,105 @@ bool uploadAudioFile(const UploadRequest &request, bool sendTags)
 				}
 			}
 
-			if (bodyComplete)
+			if (!bodySendOk)
 			{
-				bodyComplete = writeUploadBytes(*clientPtr, reinterpret_cast<const uint8_t *>(closing.c_str()),
-										closing.length(), uploadStartMs, bodyTimeoutMs, bodyBytesSent);
-			}
-			if (!bodyComplete)
-			{
-				attemptSuccess = false;
-				attemptError = "body_incomplete";
-				logWarnf("[Upload] Body incomplete after %lums: sent %lu/%lu bytes (timeout %lums)\n",
-						 millis() - uploadStartMs, static_cast<unsigned long>(bodyBytesSent),
-						 static_cast<unsigned long>(fileSize + closing.length()), bodyTimeoutMs);
-				clientPtr->stop();
-			}
-
-			unsigned long responseStartMs = millis();
-			unsigned long responseTimer = responseStartMs;
-			String response;
-			uint32_t responseLoopCount = 0;
-			unsigned long lastWatchdogFeedMs = millis();
-			constexpr unsigned long kMaxResponseWaitMs = UPLOAD_RESPONSE_WAIT_MS;
-
-			while (bodyComplete && (millis() - responseStartMs) < kMaxResponseWaitMs)
-			{
-				// Feed watchdog more frequently: every 10 iterations OR every 500ms (whichever comes first)
-				unsigned long now = millis();
-				if (++responseLoopCount >= 10 || (now - lastWatchdogFeedMs) >= 500)
-				{
-					esp_task_wdt_reset();
-					responseLoopCount = 0;
-					lastWatchdogFeedMs = now;
-				}
-
-				uint32_t readLoopCount = 0;
-				while (clientPtr->available())
-				{
-					char c = static_cast<char>(clientPtr->read());
-					response += c;
-					responseTimer = millis();
-
-					// Feed watchdog during long reads (every 1000 bytes)
-					if (++readLoopCount >= 1000)
-					{
-						esp_task_wdt_reset();
-						readLoopCount = 0;
-					}
-
-					// Safety: don't let response grow too large
-					if (response.length() > 10000)
-					{
-						logWarnf("[Upload] Response too large, truncating\n");
-						break;
-					}
-				}
-
-				if (!clientPtr->connected() && clientPtr->available() == 0)
-				{
-					break;
-				}
-
-				delay(10);
-			}
-			responseTimeMs = millis() - attemptStartMs;
-
-			if (!bodyComplete)
-			{
-				// Preserve body_incomplete instead of parsing an empty response.
-				attemptSuccess = false;
-				attemptError = "body_incomplete";
-				logWarnf("[Upload] Body incomplete from %s:%u - file: %s (response %lums)\n", endpoint.host, endpointPort, 
-					sourcePath.c_str(), static_cast<unsigned long>(responseTimeMs));
-			}
-			else if (response.isEmpty())
-			{
-				attemptSuccess = false;
-				attemptError = "empty_response";
-				logWarnf("[Upload] Empty response from %s:%u - file: %s (response %lums)\n", endpoint.host, endpointPort, 
-					sourcePath.c_str(), static_cast<unsigned long>(responseTimeMs));
+				logWarnf("[Upload] Dropping stalled socket (%s), not sending closer\n",
+						 bodyFailReason ? bodyFailReason : "body_failed");
+				dropUploadClient(clientPtr);
 			}
 			else
 			{
-				int statusCode = 0;
-				int firstSpace = response.indexOf(' ');
-				if (firstSpace >= 0)
-				{
-					int secondSpace = response.indexOf(' ', firstSpace + 1);
-					if (secondSpace > firstSpace)
-					{
-						statusCode = response.substring(firstSpace + 1, secondSpace).toInt();
-					}
-				}
+				clientPtr->print(closing);
+				esp_task_wdt_reset();
 
-				const int bodyIndex = response.indexOf("\r\n\r\n");
-				String body = bodyIndex >= 0 ? response.substring(bodyIndex + 4) : "";
-				if (statusCode < 200 || statusCode >= 300)
+				unsigned long responseStartMs = millis();
+				String response;
+				uint32_t responseLoopCount = 0;
+				unsigned long lastWatchdogFeedMs = millis();
+				constexpr unsigned long kMaxResponseWaitMs = UPLOAD_RESPONSE_WAIT_MS;
+
+				while ((millis() - responseStartMs) < kMaxResponseWaitMs)
+				{
+					unsigned long now = millis();
+					if (++responseLoopCount >= 10 || (now - lastWatchdogFeedMs) >= 500)
+					{
+						esp_task_wdt_reset();
+						responseLoopCount = 0;
+						lastWatchdogFeedMs = now;
+					}
+
+					uint32_t readLoopCount = 0;
+					while (clientPtr->available())
+					{
+						char c = static_cast<char>(clientPtr->read());
+						response += c;
+
+						if (++readLoopCount >= 1000)
+						{
+							esp_task_wdt_reset();
+							readLoopCount = 0;
+						}
+
+						if (response.length() > 10000)
+						{
+							logWarnf("[Upload] Response too large, truncating\n");
+							break;
+						}
+					}
+
+					if (!clientPtr->connected() && clientPtr->available() == 0)
+					{
+						break;
+					}
+
+					delay(10);
+				}
+				responseTimeMs = millis() - attemptStartMs;
+				if (response.isEmpty())
 				{
 					attemptSuccess = false;
-					attemptError = statusCode == 0 ? "invalid_status" : String("http_") + statusCode;
-					logErrorf("[Upload] HTTP error from %s:%u - Status: %d\n", endpoint.host, endpointPort, statusCode);
+					attemptError = "empty_response";
+					logWarnf("[Upload] Empty response from %s:%u - file: %s (response %lums)\n", endpoint.host, endpointPort, 
+						sourcePath.c_str(), static_cast<unsigned long>(responseTimeMs));
 				}
 				else
 				{
-					String analysis = analyzeServerResponse(body);
-					if (analysis != "OK")
+					int statusCode = 0;
+					int firstSpace = response.indexOf(' ');
+					if (firstSpace >= 0)
+					{
+						int secondSpace = response.indexOf(' ', firstSpace + 1);
+						if (secondSpace > firstSpace)
+						{
+							statusCode = response.substring(firstSpace + 1, secondSpace).toInt();
+						}
+					}
+
+					const int bodyIndex = response.indexOf("\r\n\r\n");
+					String body = bodyIndex >= 0 ? response.substring(bodyIndex + 4) : "";
+					if (statusCode < 200 || statusCode >= 300)
 					{
 						attemptSuccess = false;
-						attemptError = analysis;
-						logErrorf("[Upload] Server response error from %s:%u - %s\n", endpoint.host, endpointPort, analysis.c_str());
+						attemptError = statusCode == 0 ? "invalid_status" : String("http_") + statusCode;
+						logErrorf("[Upload] HTTP error from %s:%u - Status: %d\n", endpoint.host, endpointPort, statusCode);
 					}
-				}
-				if (!body.isEmpty())
-				{
-					syncClockFromApiResponse(body);
+					else
+					{
+						String analysis = analyzeServerResponse(body);
+						if (analysis != "OK")
+						{
+							attemptSuccess = false;
+							attemptError = analysis;
+							logErrorf("[Upload] Server response error from %s:%u - %s\n", endpoint.host, endpointPort, analysis.c_str());
+						}
+					}
+					// Do not sync the device clock from the upload response: body.timestamp
+					// is often recording/upload metadata, not reliable server wall clock.
 				}
 			}
 		}
 
-		if (clientPtr != nullptr)
-		{
-			clientPtr->stop();
-		}
+		dropUploadClient(clientPtr);
 		if (!request.isPsramMode)
 		{
 			audioFile.close();
@@ -2128,11 +2163,7 @@ bool uploadLogFile(const String &logFilePath)
 {
 	ensureUploadResources();
 
-	if (!WiFi.isConnected())
-	{
-		return false;
-	}
-	if (!hasApiAuthToken())
+	if (!WiFi.isConnected() || !hasApiAuthToken())
 	{
 		return false;
 	}
@@ -2184,7 +2215,7 @@ bool uploadLogFile(const String &logFilePath)
 	}
 
 	// Check if log file exists
-	if (!SD_MMC.exists(logFilePath))
+	if (!sd_bus::exists(logFilePath))
 	{
 		if (uploadMutex != nullptr)
 		{
@@ -2194,7 +2225,7 @@ bool uploadLogFile(const String &logFilePath)
 	}
 
 	// Check file size first
-	File fileProbe = SD_MMC.open(logFilePath, FILE_READ);
+	sd_bus::SdFile fileProbe = sd_bus::open(logFilePath, FILE_READ);
 	if (!fileProbe)
 	{
 		if (uploadMutex != nullptr)
@@ -2277,7 +2308,7 @@ bool uploadLogFile(const String &logFilePath)
 		}
 
 		// Reopen log file for this endpoint attempt
-		File logFile = SD_MMC.open(logFilePath, FILE_READ);
+		sd_bus::SdFile logFile = sd_bus::open(logFilePath, FILE_READ);
 		if (!logFile)
 		{
 			continue;
@@ -2316,13 +2347,13 @@ bool uploadLogFile(const String &logFilePath)
 
 			// Upload log file data
 			size_t bytesRead = 0;
-			uint32_t yieldCount = 0;
 			while ((bytesRead = logFile.read(uploadBuffer, sizeof(uploadBuffer))) > 0)
 			{
-				clientPtr->write(uploadBuffer, bytesRead);
-				if ((++yieldCount & (kUploadChunksPerYield - 1u)) == 0u)
+				if (!writeUploadBuffer(clientPtr, uploadBuffer, bytesRead))
 				{
-					vTaskDelay(1);
+					attemptSuccess = false;
+					attemptError = "tcp_write_failed";
+					break;
 				}
 			}
 
@@ -2952,8 +2983,16 @@ void connectToWiFi()
 		WiFi.begin(ssid_c, pass_c);
 
 		const unsigned long start = millis();
+		unsigned long lastWdtFeedMs = start;
+		constexpr unsigned long kWdtFeedIntervalMs = 10000UL;
 		while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs)
 		{
+			const unsigned long now = millis();
+			if ((now - lastWdtFeedMs) >= kWdtFeedIntervalMs)
+			{
+				esp_task_wdt_reset();
+				lastWdtFeedMs = now;
+			}
 			delay(500);
 		}
 
@@ -3000,7 +3039,11 @@ void network_reinitializeWiFi()
 
 void network_reconnectWiFi()
 {
-	// Same logic as RECONNECT CLI command
+	if (networkHandler_isUploading())
+	{
+		logWarnf("[Network] WiFi reconnect deferred (upload in progress)\n");
+		return;
+	}
 
 	// Disconnect WiFi
 	WiFi.disconnect(true, true);
@@ -3016,8 +3059,10 @@ void network_reconnectWiFi()
 	network_reinitializeWiFi();
 	delay(500);
 
+	esp_task_wdt_reset();
 	// Connect to WiFi
 	connectToWiFi();
+	esp_task_wdt_reset();
 
 	// Wait a bit for connection to stabilize
 	delay(1000);
@@ -3326,7 +3371,6 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 						{
 							if (setApiAuthToken(authToken))
 							{
-								eventTokenMissingResponseLogged = false;
 								logWarnf("[Event] API bearer token stored/refreshed");
 							}
 							else

@@ -7,9 +7,10 @@
 #include "network.h"
 #include "upload_queue.h"
 #include "common.h"
+#include "config.h"
 #include "esp_task_wdt.h"
 #include "recorder.h"
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <cstring>
 #include "settings.h"
 
@@ -20,105 +21,6 @@ volatile bool g_networkTaskShutdownRequested = false;
 namespace {
 
     static volatile bool s_uploadBusy = false;
-
-    bool uploadTask_trySdCardMemoryQueueOne(char *lastWarnedFilePath, uint32_t retryDelayMs, uint8_t maxRetries)
-    {
-        SdCardMemoryQueueEntry *memEntry = sdCardMemoryQueue_getNextEntry();
-        if (memEntry == nullptr)
-        {
-            return false;
-        }
-
-        char fullPath[kMaxUploadPathLength];
-        if (!sdCardMemoryQueue_buildFullPath(memEntry->basename, fullPath, sizeof(fullPath)))
-        {
-            logWarnf("[UploadTask] Invalid basename in memory queue (releasing): %s", memEntry->basename);
-            sdCardMemoryQueue_releaseEntry(memEntry);
-            return true;
-        }
-
-        s_uploadBusy = true;
-
-        File audioFile = SD_MMC.open(fullPath, FILE_READ);
-        if (!audioFile)
-        {
-            logErrorf("[UploadTask] Failed to open file from memory queue: %s\n", fullPath);
-            logDebugf("[UploadTask] skip reason=open_failed");
-            sdCardMemoryQueue_releaseEntry(memEntry);
-            s_uploadBusy = false;
-            return true;
-        }
-
-        size_t fileSize = audioFile.size();
-        audioFile.close();
-
-        UploadRequest request = {};
-        strncpy(request.path, fullPath, kMaxUploadPathLength - 1);
-        request.path[kMaxUploadPathLength - 1] = '\0';
-        request.fileSize = fileSize;
-        request.sizeBytes = fileSize > sizeof(WaveHeader) ? fileSize - sizeof(WaveHeader) : fileSize;
-        request.recordedAtEpoch = memEntry->recordedAtEpoch;
-        request.recordedAtMs = memEntry->recordedAtMs;
-        request.isPsramMode = false;
-        request.attempts = 0;
-        if (appSettings.audio.sampleRate > 0)
-        {
-            request.durationMs = static_cast<uint32_t>((static_cast<uint64_t>(request.sizeBytes) * 1000ULL) /
-                                                       (appSettings.audio.sampleRate * sizeof(int16_t)));
-        }
-
-        network_updateRssi();
-        network_incrementUploadAttempt();
-
-        esp_task_wdt_reset();
-        bool uploadSuccess = uploadAudioFile(request, true);
-        esp_task_wdt_reset();
-
-        if (uploadSuccess)
-        {
-            logInfof("[UploadTask] Memory queue file uploaded successfully: %s", request.path);
-            if (uploadQueue_markUploaded(request.path))
-            {
-                logDebugf("[UploadTask] Memory queue file moved to /inbox: %s", request.path);
-                memEntry->uploadRetryCount = 0;
-                sdCardMemoryQueue_releaseEntry(memEntry);
-            }
-            lastWarnedFilePath[0] = '\0';
-        }
-        else
-        {
-            recorder_incrementErrorCount();
-            // This branch is reached only after uploadAudioFile() made an
-            // attempt; token/endpoint cooldowns return before queue processing.
-            logWarnf("[UploadTask] upload failed reason=%s path=%s",
-                     network_getLastUploadFailureReason(), request.path);
-
-            memEntry->uploadRetryCount++;
-            if (memEntry->uploadRetryCount >= maxRetries)
-            {
-                logWarnf("[UploadTask] SD memory queue upload failed %u consecutive times, dropping queue entry: %s (file remains on SD)",
-                         static_cast<unsigned>(memEntry->uploadRetryCount), request.path);
-                sdCardMemoryQueue_releaseEntry(memEntry);
-                lastWarnedFilePath[0] = '\0';
-            }
-            else
-            {
-                if (strcmp(request.path, lastWarnedFilePath) != 0)
-                {
-                    logWarnf("[UploadTask] Memory queue upload failed (will retry %u/%u): %s",
-                             static_cast<unsigned>(memEntry->uploadRetryCount),
-                             static_cast<unsigned>(maxRetries),
-                             request.path);
-                    strncpy(lastWarnedFilePath, request.path, kMaxUploadPathLength - 1);
-                    lastWarnedFilePath[kMaxUploadPathLength - 1] = '\0';
-                }
-                vTaskDelay(pdMS_TO_TICKS(retryDelayMs));
-            }
-        }
-
-        s_uploadBusy = false;
-        return true;
-    }
 }
 
 bool networkHandler_isUploading()
@@ -252,7 +154,7 @@ bool handleUploadOne()
 
         esp_task_wdt_reset();
 
-        bool uploadSuccess = uploadAudioFile(request, true);
+        bool uploadSuccess = uploadAudioFile(request, false);
 
         esp_task_wdt_reset();
 
@@ -266,12 +168,12 @@ bool handleUploadOne()
             lastSuccessfulUploadMs = millis();
             lastSustainedFailureErrorMs = 0;
             lastWarnedFilePath[0] = '\0';
+            vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTER_FILE_COOLDOWN_MS));
         }
         else
         {
             recorder_incrementErrorCount();
-            // This branch is reached only after uploadAudioFile() made an
-            // attempt; token/endpoint cooldowns return before queue processing.
+
             logWarnf("[UploadTask] upload failed reason=%s path=%s",
                      network_getLastUploadFailureReason(), request.path);
 
@@ -338,14 +240,8 @@ bool handleUploadOne()
 
         if (elapsed < kStartupDelayMs)
         {
-            logDebugf("[UploadTask] Startup delay active (%lu/%lu ms), SPIRAM queue only",
+            logDebugf("[UploadTask] Startup delay active (%lu/%lu ms), deferring SD upload_list drain",
                       elapsed, kStartupDelayMs);
-
-            if (uploadTask_trySdCardMemoryQueueOne(lastWarnedFilePath, kRetryDelayMs, kUploadMaxRetries))
-            {
-                return true;
-            }
-
             logDebugf("[UploadTask] skip reason=startup_delay");
             return false;
         }
@@ -354,18 +250,13 @@ bool handleUploadOne()
         logInfof("[UploadTask] Startup delay complete, filesystem fallback enabled");
     }
 
-    if (uploadTask_trySdCardMemoryQueueOne(lastWarnedFilePath, kRetryDelayMs, kUploadMaxRetries))
-    {
-        return true;
-    }
-
     if (now < nextFsFallbackScanAllowedMs)
     {
-        logDebugf("[UploadTask] filesystem fallback scan deferred");
+        logDebugf("[UploadTask] upload_list scan deferred");
         return false;
     }
 
-    logDebugf("[UploadTask] Checking SD card filesystem fallback (newest .wav)");
+    logDebugf("[UploadTask] Checking per-day upload_list (newest day first)");
 
     const char *skipPath = (fsFallbackRetryPath[0] != '\0') ? fsFallbackRetryPath : nullptr;
     String filePath = uploadQueue_getNextFile(skipPath);
@@ -378,7 +269,12 @@ bool handleUploadOne()
             fsFallbackRetryPath[0] = '\0';
             fsFallbackRetryCount = 0;
         }
-        nextFsFallbackScanAllowedMs = now + kFsFallbackEmptyScanMinIntervalMs;
+        // A miss during an active recording is often a /pending lock fail, not an empty list.
+        // Do not apply the long empty-scan backoff or uploads stall for the whole clip.
+        if (!recorder_isRecording())
+        {
+            nextFsFallbackScanAllowedMs = now + kFsFallbackEmptyScanMinIntervalMs;
+        }
         logDebugf("[UploadTask] skip reason=queue_empty");
         return false;
     }
@@ -395,7 +291,7 @@ bool handleUploadOne()
 
     s_uploadBusy = true;
 
-    File audioFile = SD_MMC.open(filePath, FILE_READ);
+    sd_bus::SdFile audioFile = sd_bus::open(filePath, FILE_READ);
     if (!audioFile)
     {
         storage_recordReadError();
@@ -448,7 +344,7 @@ bool handleUploadOne()
 
     esp_task_wdt_reset();
 
-    bool uploadSuccess = uploadAudioFile(request, true);
+    bool uploadSuccess = uploadAudioFile(request, false);
 
     esp_task_wdt_reset();
 
@@ -464,12 +360,12 @@ bool handleUploadOne()
         fsFallbackRetryPath[0] = '\0';
         fsFallbackRetryCount = 0;
         lastWarnedFilePath[0] = '\0';
+        vTaskDelay(pdMS_TO_TICKS(UPLOAD_INTER_FILE_COOLDOWN_MS));
     }
     else
     {
         recorder_incrementErrorCount();
-        // This branch is reached only after uploadAudioFile() made an attempt;
-        // token/endpoint cooldowns return before selecting a filesystem file.
+
         logWarnf("[UploadTask] upload failed reason=%s path=%s",
                  network_getLastUploadFailureReason(), request.path);
 
@@ -518,14 +414,11 @@ void networkTask(void *pvParameters)
     {
         esp_task_wdt_reset();
         const bool uploadDidWork = handleUploadOne();
-        if (uploadDidWork)
-        {
-            network_drainEventsUntilMillis(millis() + 25);
-        }
-        else
+        if (!uploadDidWork)
         {
             network_drainEventsUntilMillis(millis() + 120);
         }
+        // While uploading, defer event TCP so POST body is the only active cloud socket.
         vTaskDelay(pdMS_TO_TICKS(20));
     }
     networkTaskHandle = nullptr;
@@ -548,7 +441,7 @@ void networkHandler_init()
         "NetworkTask",
         16384,
         nullptr,
-        1,
+        2,
         &networkTaskHandle,
         0);
 
