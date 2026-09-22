@@ -4,21 +4,18 @@ This document explains how the firmware handles upload failures in **SD card sto
 
 **Primary source files:**
 - `src/networkHandller.cpp` — upload task orchestration and retry decisions
-- `src/upload_queue.h` / `src/upload_queue.cpp` — queue structures and filesystem scan
-- `src/recorder.cpp` — enqueues new recordings into the SD memory queue after finalize
+- `src/upload_queue.h` / `src/upload_queue.cpp` — per-day `upload_list` on SD
+- `src/recorder.cpp` — appends each finalized WAV basename to that day's `upload_list`
+
+Pending-name storage is documented in [PENDING_UPLOAD_LIST.md](./PENDING_UPLOAD_LIST.md).
 
 ---
 
 ## Overview
 
-In SD card mode, completed recordings live on disk under `/pending/YYYY/MM/DD/*.wav`. The upload task (`NetworkTask` on Core 0) drains them through **two tiers**:
+In SD card mode, completed recordings live on disk under `/pending/YYYY/MM/DD/*.wav`. Pending **names** live in that day's `upload_list`. The upload task (`NetworkTask` on Core 0) reads one name at a time from those lists (**newest day first**). There is no in-RAM backlog of filenames.
 
-| Tier | Name | What it is | When used |
-|------|------|------------|-----------|
-| **1** | SD Memory Queue | SPIRAM-backed list of basenames (up to 50 entries) | Immediately after recording; also during the 30 s startup window |
-| **2** | Filesystem fallback | Full scan of `/pending` for the **newest** `.wav` | After startup delay, when the memory queue is empty |
-
-Both tiers call the same HTTP upload path (`uploadAudioFile`). Retry behavior differs slightly between them, but both now share the same limits.
+The HTTP path is still `uploadAudioFile`. After a few consecutive failures on the same path, that path is skipped so another list entry can upload; the failed name stays on the list.
 
 ### Shared constants
 
@@ -26,8 +23,8 @@ Both tiers call the same HTTP upload path (`uploadAudioFile`). Retry behavior di
 |----------|-------|---------|
 | `kUploadMaxRetries` | **3** | Max consecutive upload failures before giving up on the current queue entry / file attempt |
 | `kRetryDelayMs` | **1000 ms** | Delay after a failed upload before the upload task tries again |
-| `kStartupDelayMs` | **30 000 ms** | After boot, only the memory queue is serviced; filesystem scan is deferred |
-| `kFsFallbackEmptyScanMinIntervalMs` | **5000 ms** | Minimum interval between filesystem scans when `/pending` appears empty |
+| `kStartupDelayMs` | **30 000 ms** | After boot, SD `upload_list` drain is deferred |
+| `kFsFallbackEmptyScanMinIntervalMs` | **5000 ms** | Minimum interval between list reads when no pending name is found |
 
 ---
 

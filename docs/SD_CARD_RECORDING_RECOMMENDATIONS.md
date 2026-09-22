@@ -6,12 +6,12 @@ This document captures **holistic recommendations** for managing recordings when
 
 ---
 
-## Current implementation (SPIRAM basename queue + concurrent uploads)
+## Current implementation (per-day SD `upload_list`)
 
-- **Pending-path queue:** Up to **50** entries allocated in **SPIRAM** when possible (`heap_caps_malloc`, DRAM fallback on failure). Each slot stores the **basename** only (e.g. `YYYY-MM-DD-HH-MM-SS.wav`); `sdCardMemoryQueue_buildFullPath()` reconstructs `/pending/YYYY/MM/DD/<basename>` for `SD_MMC.open` and `markUploaded`.
-- **Hot path:** The upload task drains this queue **first** (oldest by `recordedAtEpoch`). It does **not** pause uploads while **recording**, and there is **no** 5-second delay between SPIRAM-queue uploads.
-- **Overflow:** If the queue is full when a recording is added, the **oldest** slot is dropped (file remains on the card for fallback).
-- **Fallback:** If the SPIRAM queue is empty, `uploadQueue_getNextFile()` still performs a **full-tree** scan (newest `.wav`) for orphans (e.g. after reboot or overflow). Logs `fallback filesystem_scan next file` at debug. For the first **30 s** after boot, only the SPIRAM queue is processed; filesystem fallback starts after that.
+- **Pending names:** Each day's folder holds append-only `upload_list` plus `upload_list.idx` (line cursor). The WAV files stay on SD. Firmware does not keep the backlog in RAM. See [PENDING_UPLOAD_LIST.md](./PENDING_UPLOAD_LIST.md).
+- **Hot path:** After the 30 s boot delay, the upload task reads the newest day's list one name at a time.
+- **Overflow:** There is no in-memory slot cap; a large backlog only grows the on-card lists.
+- **Legacy cards:** A day folder with WAVs but no list is seeded into `upload_list` on first visit.
 - **`markUploadedWithRecord`:** Uses the same **`g_pendingDirMutex`** serialization as `markUploaded`.
 - **Observability:** `[UploadTask] skip reason=…` (debug) for `wifi`, `no_credentials`, `sd_unavailable`, `startup_delay`, `queue_empty`, `mutex_timeout`, `open_failed`. Upload failures log `upload failed reason=<network_getLastUploadFailureReason()> path=…` (see `network.cpp`).
 - **SD recorder write path:** Audio writes **batch `flush()`** (400 ms or 32 KiB) with **flush on finalize**; **`recordings` JSONL** gets **`sizeBytes`** from `sizeof(WaveHeader)+recordedBytes` (no extra read-open); **session cache** skips repeat **`/pending`** and same-day **`storage_ensureDirectoryPath`** until SD failure hooks clear it. Details: [SD_CARD_IO_OPTIMIZATION.md §1](./SD_CARD_IO_OPTIMIZATION.md#1-recording-path-largest-write-amplification).
@@ -50,9 +50,9 @@ The **full-tree** fallback and **30 s** startup window (SPIRAM-only) can still d
 
 ### 2.4 Web UI playback vs recorder / uploader
 
-Streaming WAVs from SD (`/api/recordings/stream` in `boondock_server.cpp`) interleaves **long reads** with **writes** (recording) and **reads** (upload). ESP32 SDMMC + FAT can show **timeouts or flaky** behavior under load.
+Streaming WAVs from SD (`/api/recordings/stream` in `boondock_server.cpp`) interleaves **long reads** with **writes** (recording) and **reads** (upload). All of those paths take **`sd_bus` per syscall** (see [SD_BUS_LOCK.md](./SD_BUS_LOCK.md)); do not add raw `SD_MMC` in the web server.
 
-**Recommendation:** **Rate-limit** or **pause** streaming when upload/recorder pressure is high; optional **smaller chunks** or **lower priority** for the web server task.
+**Recommendation:** Keep streaming chunked and unlocked across Wi‑Fi. Optional: **rate-limit** or **pause** streaming when upload/recorder pressure is high.
 
 ### 2.5 Concurrency on successful upload
 
@@ -64,7 +64,7 @@ Streaming WAVs from SD (`/api/recordings/stream` in `boondock_server.cpp`) inter
 
 ### Priority A — Scheduling and throughput
 
-1. **Decide** whether uploads of **completed** `.wav` files (not the active `.tmp`) may run **while another recording is in progress**. If yes, relax the `recorder_isRecording()` gate for filesystem uploads only (still avoid opening the **current** `.tmp`).
+1. **Done:** completed `.wav` files may upload while another recording is in progress. `getNextFile()` is no longer gated on `recorder_isRecording()`; only the live `.tmp` is excluded (it is never on `upload_list`).
 2. **Revisit** `kSdCardFileUploadDelayMs` — a fixed multi-second gap **caps** drain rate; tune for SD fairness vs backlog.
 3. After each **record_end**, optionally **trigger a burst** of one or more upload attempts before the next idle delay.
 

@@ -10,7 +10,8 @@
 
 #include <WiFi.h>
 #include <HTTPClient.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
+#include <ctime>
 #include <AsyncTCP.h>
 #include <AsyncMqttClient.h>
 #include <esp_task_wdt.h>
@@ -148,7 +149,7 @@ namespace
 
         if (cmd == "play_cloud")
         {
-            if (!SD_MMC.cardType())
+            if (!sd_bus::cardType())
             {
                 logWarnf("[MQTT] play_cloud rejected: SD card not present");
                 return false;
@@ -166,7 +167,7 @@ namespace
 
         if (cmd == "play_transmit" || cmd == "play_transmit_mp3")
         {
-            if (!SD_MMC.cardType())
+            if (!sd_bus::cardType())
             {
                 logWarnf("[MQTT] %s rejected: SD card not present", cmd.c_str());
                 return false;
@@ -202,6 +203,87 @@ namespace
         logWarnf("[MQTT] unknown command: %s", cmd.c_str());
         return false;
     }
+}
+
+// Cloud play filename: 2026-08-17T08-35-14Z.wav -> inbox basename 2026-08-17-08-35-14.wav
+static bool toInboxBasename(const String &fileName, String &outBasename)
+{
+    if (!fileName.endsWith(".wav") || fileName.length() < 24)
+        return false;
+
+    const String stem = fileName.substring(0, fileName.length() - 4);
+    if (stem.length() != 20 || stem.charAt(4) != '-' || stem.charAt(7) != '-' ||
+        stem.charAt(10) != 'T' || stem.charAt(19) != 'Z')
+    {
+        return false;
+    }
+
+    const String timePart = stem.substring(11, 19);
+    if (timePart.charAt(2) != '-' || timePart.charAt(5) != '-')
+        return false;
+
+    outBasename = stem.substring(0, 10) + "-" + timePart + ".wav";
+    return true;
+}
+
+// Outbox / cloud download filename: 2026-08-17T09-57-42Z.wav
+static bool toOutboxBasename(const String &fileName, String &outBasename)
+{
+    if (!fileName.endsWith(".wav") || fileName.length() < 24)
+        return false;
+
+    const String stem = fileName.substring(0, fileName.length() - 4);
+    if (stem.length() != 20 || stem.charAt(10) != 'T' || stem.charAt(19) != 'Z')
+        return false;
+
+    outBasename = fileName;
+    return true;
+}
+
+static String findInboxFilePath(const String &fileName)
+{
+    String inboxBasename;
+    if (!toInboxBasename(fileName, inboxBasename))
+        return "";
+
+    const String inboxPath = "/inbox/" + inboxBasename.substring(0, 4) + "/" +
+                             inboxBasename.substring(5, 7) + "/" +
+                             inboxBasename.substring(8, 10) + "/" + inboxBasename;
+    if (sd_bus::exists(inboxPath))
+        return inboxPath;
+    return "";
+}
+
+static String buildOutboxPath(const String &fileName)
+{
+    if (fileName.length() == 0)
+        return "";
+
+    String year;
+    String month;
+    String day;
+    if (fileName.length() >= 10 && fileName.charAt(4) == '-' && fileName.charAt(7) == '-')
+    {
+        year = fileName.substring(0, 4);
+        month = fileName.substring(5, 7);
+        day = fileName.substring(8, 10);
+    }
+    else
+    {
+        time_t now = 0;
+        time(&now);
+        if (isEpochValid(now))
+        {
+            struct tm timeinfo;
+            gmtime_r(&now, &timeinfo);
+            char datePath[16];
+            strftime(datePath, sizeof(datePath), "%Y/%m/%d", &timeinfo);
+            return String("/outbox/") + datePath + "/" + fileName;
+        }
+        return String("/outbox/1970/01/01/") + fileName;
+    }
+
+    return "/outbox/" + year + "/" + month + "/" + day + "/" + fileName;
 }
 
 void mqttTask(void *pvParameters);
@@ -376,27 +458,59 @@ void connectToMqtt()
     mqttClient.connect();
 }
 
+String resolvePlayFilePath(const String &fileName, const String &macAddress)
+{
+    if (fileName.length() == 0 || macAddress.length() == 0)
+        return "";
+
+    const String inboxPath = findInboxFilePath(fileName);
+    if (inboxPath.length() > 0)
+    {
+        logWarnf("[Playback] Found in inbox: %s", inboxPath.c_str());
+        return inboxPath;
+    }
+
+    String outboxBasename;
+    if (!toOutboxBasename(fileName, outboxBasename))
+    {
+        logWarnf("[Playback] Unrecognized play filename: %s", fileName.c_str());
+        return "";
+    }
+
+    logWarnf("[Playback] Inbox miss; checking outbox/download: %s", outboxBasename.c_str());
+    return downloadFile(outboxBasename, macAddress);
+}
+
 String downloadFile(const String &fileName, const String &macAddress)
 {
     if (fileName.length() == 0 || macAddress.length() == 0)
         return "";
 
-    const String outPath = "/outload/" + fileName;
+    const String outPath = buildOutboxPath(fileName);
+    if (outPath.length() == 0)
+        return "";
 
-    if (SD_MMC.exists(outPath))
+    if (sd_bus::exists(outPath))
         return outPath;
 
-    if (!storage_ensureDirectoryPath("/outload"))
+    const int lastSlash = outPath.lastIndexOf('/');
+    if (lastSlash <= 0)
         return "";
+    if (!storage_ensureDirectoryPath(outPath.substring(0, lastSlash).c_str()))
+        return "";
+
+    constexpr size_t kBufSize = 8192;
+    static uint8_t buffer[kBufSize];
+
+    WiFi.setSleep(false);
 
     HTTPClient http;
     const String url = String(FULL_PATH) + "?mac_address=" + macAddress + "&filename=" + fileName + "&output=wav";
     http.setTimeout(15000);
+    http.setReuse(false);
     esp_task_wdt_reset();
     if (!http.begin(url))
-    {
         return "";
-    }
 
     esp_task_wdt_reset();
     const int code = http.GET();
@@ -408,18 +522,25 @@ String downloadFile(const String &fileName, const String &macAddress)
     }
 
     WiFiClient *stream = http.getStreamPtr();
-    File file = SD_MMC.open(outPath, FILE_WRITE);
+    if (!stream)
+    {
+        http.end();
+        return "";
+    }
+
+    sd_bus::SdFile file = sd_bus::open(outPath, FILE_WRITE);
     if (!file)
     {
         http.end();
         return "";
     }
 
-    uint8_t buffer[1024];
-    int len = http.getSize();
+    int remaining = http.getSize();
+    size_t bytesWritten = 0;
     unsigned long lastWdtMs = millis();
+    bool writeOk = true;
 
-    while (http.connected() && (len > 0 || len == -1))
+    while (http.connected() && (remaining > 0 || remaining == -1))
     {
         const unsigned long now = millis();
         if ((now - lastWdtMs) >= 250)
@@ -429,37 +550,55 @@ String downloadFile(const String &fileName, const String &macAddress)
         }
 
         const size_t avail = stream->available();
-        if (avail)
+        if (avail == 0)
         {
-            const int c = stream->readBytes(buffer, min((int)sizeof(buffer), (int)avail));
-            file.write(buffer, c);
-            if (len > 0)
-                len -= c;
+            if (!stream->connected())
+                break;
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
         }
-        else if (!http.connected())
+
+        size_t toRead = avail;
+        if (toRead > kBufSize)
+            toRead = kBufSize;
+        if (remaining > 0 && toRead > static_cast<size_t>(remaining))
+            toRead = static_cast<size_t>(remaining);
+
+        const int c = stream->read(buffer, toRead);
+        if (c <= 0)
         {
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        if (file.write(buffer, static_cast<size_t>(c)) != static_cast<size_t>(c))
+        {
+            writeOk = false;
             break;
         }
-        else
-        {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
+
+        bytesWritten += static_cast<size_t>(c);
+        if (remaining > 0)
+            remaining -= c;
     }
 
     esp_task_wdt_reset();
-
+    file.flush();
     file.close();
     http.end();
 
-    if (!SD_MMC.exists(outPath))
+    if (!writeOk || bytesWritten == 0 || remaining > 0)
+    {
+        sd_bus::remove(outPath);
         return "";
+    }
 
-    File verify = SD_MMC.open(outPath, FILE_READ);
+    sd_bus::SdFile verify = sd_bus::open(outPath, FILE_READ);
     if (!verify || verify.size() == 0)
     {
         if (verify)
             verify.close();
-        SD_MMC.remove(outPath);
+        sd_bus::remove(outPath);
         return "";
     }
     verify.close();

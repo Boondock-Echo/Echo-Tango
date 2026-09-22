@@ -23,6 +23,7 @@
 #include "nvs.h"
 #include "health.h"
 #include "networkHandller.h"
+#include "sd_bus.h"
 #if defined(ECHO)
 #include "echo_led.h"
 #include "echo_keypad.h"
@@ -221,12 +222,7 @@ namespace
             messageToSend += "\n";
         }
         
-        // Send entire message atomically using write() instead of print()
-        // This ensures the message is sent as a single unit
         Serial.write(reinterpret_cast<const uint8_t*>(messageToSend.c_str()), messageToSend.length());
-        
-        // Flush to ensure message is fully transmitted
-        Serial.flush();
     }
     
     // Helper function to output JSON to Serial with mutex protection
@@ -244,7 +240,7 @@ namespace
         
         if (serialMutex != nullptr)
         {
-            mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(5000)) == pdTRUE);
+            mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE);
         }
         
         // Only send if we acquired mutex or mutex is not available (fallback)
@@ -261,7 +257,7 @@ namespace
     }
 }
 
-void sendConfigMessage()
+void sendConfigMessage(bool mutexAlreadyHeld)
 {
     // First message: Recorder settings
     DynamicJsonDocument recorderDoc(1024);
@@ -291,8 +287,6 @@ void sendConfigMessage()
     String recorderEventMessage;
     serializeJson(recorderEventData, recorderEventMessage);
     sendEvent("config", recorderEventMessage);
-    
-    outputJsonToSerial(recorderJsonOutput);
     
     // Second message: General settings
     DynamicJsonDocument generalDoc(1024);
@@ -328,7 +322,31 @@ void sendConfigMessage()
     serializeJson(generalEventData, generalEventMessage);
     sendEvent("config", generalEventMessage);
     
-    outputJsonToSerial(generalJsonOutput);
+    // Acquire Serial mutex to prevent interleaving with CLI command output.
+    // Skip acquisition if caller already holds it (e.g., from serial command handler).
+    SemaphoreHandle_t serialMutex = settings_getSerialMutex();
+    bool mutexAcquired = mutexAlreadyHeld;
+    
+    if (!mutexAlreadyHeld && serialMutex != nullptr)
+    {
+        mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE);
+    }
+    
+    // Only send if we acquired mutex or mutex is not available (fallback)
+    if (!mutexAcquired && serialMutex != nullptr)
+    {
+        // If mutex acquisition fails after timeout, skip serial output to avoid indefinite blocking
+        return;
+    }
+    
+    outputJsonToSerialDirect(recorderJsonOutput);
+    outputJsonToSerialDirect(generalJsonOutput);
+    
+    // Release mutex only if we acquired it (not if caller already held it)
+    if (!mutexAlreadyHeld && mutexAcquired && serialMutex != nullptr)
+    {
+        xSemaphoreGive(serialMutex);
+    }
 }
 
 void sendHealthMessage(bool mutexAlreadyHeld)
@@ -357,7 +375,7 @@ void sendHealthMessage(bool mutexAlreadyHeld)
     
     if (!mutexAlreadyHeld && serialMutex != nullptr)
     {
-        mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(5000)) == pdTRUE);
+        mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE);
     }
     
     // Only send if we acquired mutex or mutex is not available (fallback)
@@ -580,7 +598,7 @@ void serialTask(void *pvParameters)
                 SemaphoreHandle_t serialMutex = settings_getSerialMutex();
                 if (serialMutex != nullptr)
                 {
-                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(5000)) == pdTRUE)
+                    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE)
                     {
                         DynamicJsonDocument doc(512);
                         doc["tm"] = getFormattedTimeWithTimezone(); // Time as first parameter
@@ -715,6 +733,7 @@ void setup()
         delay(50 - elapsed);
     }
     
+    sd_bus::init();
     logger_begin();
     logResetReason();
 
@@ -883,7 +902,7 @@ void setup()
 #if defined(ECHO)
     {
         const String bootWav = system_assets_localBootWavPath();
-        if (isStorageModeSdCard() && bootWav.length() > 0 && SD_MMC.exists(bootWav))
+        if (isStorageModeSdCard() && bootWav.length() > 0 && sd_bus::exists(bootWav))
         {
             // Prevent the recorder from triggering on startup audio (speaker output can leak into mic).
             // We don't know WAV duration here, so use a conservative small window.
@@ -967,7 +986,7 @@ void setup()
         "WebServer",
         8192,
         nullptr,
-        2,  // Priority 2 (same as RecordTask, higher than NetworkTask/MaintenanceTask)
+        2,  // Priority 2 (same as RecordTask/NetworkTask, higher than MaintenanceTask)
         &webServerTaskHandle,
         1);  // Core 1 (keep Maintenance/Upload/Serial on core 0)
 
@@ -1017,11 +1036,11 @@ bool system_isUploading()
 
 int system_getUploadQueueSize()
 {
-    // PSRAM mode: PSRAM queue count; SD mode: files in /pending + items in memory priority queue
+    // PSRAM mode: PSRAM queue count; SD mode: names remaining in per-day upload_list files
     if (isStorageModePsram()) {
         return static_cast<int>(psramQueue_getPendingCount());
     }
-    return static_cast<int>(uploadQueue_getPendingCount() + sdCardMemoryQueue_getPendingCount());
+    return static_cast<int>(uploadQueue_getPendingCount());
 }
 
 

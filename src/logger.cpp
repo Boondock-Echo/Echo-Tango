@@ -5,7 +5,7 @@
 #include "network.h"
 
 #include <FS.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -36,7 +36,7 @@ namespace
     String g_lineBuffer;
     String g_serialLineBuffer;
 
-    File g_logFile;
+    sd_bus::SdFile g_logFile;
     uint32_t g_currentDateKey = 0;
     String g_currentLogPath;
     String g_unsyncedLogPath;
@@ -138,9 +138,9 @@ namespace
             }
 
             accum += "/" + part;
-            if (!SD_MMC.exists(accum))
+            if (!sd_bus::exists(accum))
             {
-                if (!SD_MMC.mkdir(accum))
+                if (!sd_bus::mkdir(accum))
                 {
                     return false;
                 }
@@ -260,7 +260,7 @@ namespace
                 }
             }
 
-            g_logFile = SD_MMC.open(desiredPath, FILE_APPEND);
+            g_logFile = sd_bus::open(desiredPath, FILE_APPEND);
             if (!g_logFile)
             {
                 return false;

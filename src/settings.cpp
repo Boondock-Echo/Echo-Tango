@@ -75,7 +75,7 @@ SemaphoreHandle_t settings_getSerialMutex()
     return g_serialMutex;
 }
 #include <FS.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <time.h>
 #include <sys/time.h>
 #ifdef ESP32
@@ -1243,19 +1243,20 @@ static void appSettingsToJson(DynamicJsonDocument &doc)
 #if defined(BOONDOCK_HAS_RECORD_INPUT_CHANNEL)
     audio[JsonKeys::RECORD_INPUT_CHANNEL] = appSettings.audio.recordInputChannel;
 #endif
+
+#if defined(ECHO)
     audio[JsonKeys::SPEAKER_ENABLED] = appSettings.speakerEnabled;
     audio[JsonKeys::SPEAKER_VOLUME] = static_cast<unsigned>(appSettings.speakerVolume);
     audio[JsonKeys::TRANSMIT_ENABLED] = appSettings.transmitEnabled;
     audio[JsonKeys::TRANSMIT_VOLUME] = static_cast<unsigned>(appSettings.transmitVolume);
-#if defined(ECHO)
     audio[JsonKeys::REPEATER_ENABLED] = appSettings.repeaterEnabled;
     audio[JsonKeys::REPEATER_MODE] = static_cast<unsigned>(appSettings.repeaterMode);
-#endif
     audio[JsonKeys::CW_WPM] = static_cast<unsigned>(appSettings.cwWpm);
     audio[JsonKeys::CW_TONE_HZ] = static_cast<unsigned>(appSettings.cwToneHz);
     audio[JsonKeys::CW_VOLUME] = static_cast<unsigned>(appSettings.cwVolume);
     audio[JsonKeys::CW_REPEAT] = static_cast<unsigned>(appSettings.cwRepeat);
-
+#endif
+    
     // upload
     JsonObject upload = doc.createNestedObject(JsonKeys::UPLOAD);
     upload[JsonKeys::QUEUE_DEPTH] = appSettings.upload.queueDepth;
@@ -1305,7 +1306,6 @@ static void appSettingsToJson(DynamicJsonDocument &doc)
     log[JsonKeys::FILE_DEBUG] = appSettings.log.fileDebug;
     log[JsonKeys::FILE_EVENT] = appSettings.log.fileEvent;
     
-    
     doc[JsonKeys::HOSTNAME] = appSettings.hostname;
     doc[JsonKeys::MQTT_KEY] = appSettings.mqttKey;
 
@@ -1315,10 +1315,12 @@ static void appSettingsToJson(DynamicJsonDocument &doc)
     // webserverEnabled
     doc[JsonKeys::WEBSERVER_ENABLED] = appSettings.webserverEnabled;
 
+#if defined(ECHO)
     // Legacy LED compatibility settings
     doc[JsonKeys::LED_STYLE] = static_cast<unsigned>(appSettings.ledStyle);
     doc[JsonKeys::STARTUP_MODE] = static_cast<unsigned>(appSettings.startupMode);
     doc[JsonKeys::OFFLINE_MODE] = appSettings.offlineMode;
+#endif
 
     // Runtime metadata exposed for web UI consumption
     JsonObject runtime = doc.createNestedObject(JsonKeys::RUNTIME);
@@ -1610,7 +1612,6 @@ static bool jsonToAppSettings(const JsonObject &root)
                 }
             }
 
-
             if (newValue < appSettings.audio.minRecordingMs)
             {
                 LOG_DEBUG("Maximum recording time cannot be shorter than minimum recording time. It has been set to match the minimum.");
@@ -1698,6 +1699,7 @@ static bool jsonToAppSettings(const JsonObject &root)
         }
 #endif
 
+#if defined(ECHO)
         if (audio.containsKey(JsonKeys::SPEAKER_ENABLED) || audio.containsKey("speakerEnabled"))
         {
             bool newValue = audio.containsKey(JsonKeys::SPEAKER_ENABLED) ? audio[JsonKeys::SPEAKER_ENABLED].as<bool>() : audio["speakerEnabled"].as<bool>();
@@ -1751,7 +1753,6 @@ static bool jsonToAppSettings(const JsonObject &root)
             }
         }
 
-#if defined(ECHO)
         if (audio.containsKey(JsonKeys::REPEATER_ENABLED) || audio.containsKey("repeaterEnabled"))
         {
             bool newValue = audio.containsKey(JsonKeys::REPEATER_ENABLED) ? audio[JsonKeys::REPEATER_ENABLED].as<bool>() : audio["repeaterEnabled"].as<bool>();
@@ -1778,7 +1779,6 @@ static bool jsonToAppSettings(const JsonObject &root)
                 appSettings.repeaterMode = newValue;
             }
         }
-#endif
 
         // CW settings (global)
         if (audio.containsKey(JsonKeys::CW_WPM) || audio.containsKey("cwWpm"))
@@ -1829,6 +1829,7 @@ static bool jsonToAppSettings(const JsonObject &root)
                 appSettings.cwRepeat = newValue;
             }
         }
+#endif
     }
 
     bool hasUpload = (root.containsKey(JsonKeys::UPLOAD) || root.containsKey("upload"));
@@ -2326,6 +2327,7 @@ static bool jsonToAppSettings(const JsonObject &root)
         }
     }
 
+#if defined(ECHO)
     // ledStyle / startupMode / offlineMode (legacy LED behavior)
     if (root.containsKey(JsonKeys::LED_STYLE) || root.containsKey("ledStyle"))
     {
@@ -2351,6 +2353,7 @@ static bool jsonToAppSettings(const JsonObject &root)
             appSettings.startupMode = newValue;
         }
     }
+
     if (root.containsKey(JsonKeys::OFFLINE_MODE) || root.containsKey("offlineMode"))
     {
         bool newValue = root.containsKey(JsonKeys::OFFLINE_MODE) ? root[JsonKeys::OFFLINE_MODE].as<bool>() : root["offlineMode"].as<bool>();
@@ -2360,6 +2363,8 @@ static bool jsonToAppSettings(const JsonObject &root)
             appSettings.offlineMode = newValue;
         }
     }
+
+#endif
 
 #if defined(BOONDOCK_HAS_RECORD_INPUT_CHANNEL)
     // Keep live recording/monitor path aligned with appSettings after any load/merge (e.g. NVS without `ric`).
@@ -3639,6 +3644,8 @@ String settings_getParam(const String &param)
     if (lowerParam == "audio.recordinputchannel")
         return String(static_cast<unsigned>(appSettings.audio.recordInputChannel));
 #endif
+    
+#if defined(ECHO)
     if (lowerParam == "audio.speakerenabled")
         return String(appSettings.speakerEnabled ? "true" : "false");
     if (lowerParam == "audio.speakervolume")
@@ -3647,14 +3654,10 @@ String settings_getParam(const String &param)
         return String(appSettings.transmitEnabled ? "true" : "false");
     if (lowerParam == "audio.transmitvolume")
         return String(static_cast<unsigned>(appSettings.transmitVolume));
-
-#if defined(ECHO)
     if (lowerParam == "repeater.enabled")
         return String(appSettings.repeaterEnabled ? "true" : "false");
     if (lowerParam == "repeater.mode")
         return String(static_cast<unsigned>(appSettings.repeaterMode));
-#endif
-
     if (lowerParam == "cw.wpm")
         return String(static_cast<unsigned>(appSettings.cwWpm));
     if (lowerParam == "cw.tonehz")
@@ -3663,6 +3666,8 @@ String settings_getParam(const String &param)
         return String(static_cast<unsigned>(appSettings.cwVolume));
     if (lowerParam == "cw.repeat")
         return String(static_cast<unsigned>(appSettings.cwRepeat));
+
+#endif
 
     if (lowerParam == "upload.queuedepth")
         return String(appSettings.upload.queueDepth);
@@ -4116,6 +4121,7 @@ bool settings_setParam(const String &param, const String &value)
     }
 #endif
 
+#if defined(ECHO)
     if (lowerParam == "audio.speakerenabled")
     {
         String v = value;
@@ -4132,7 +4138,11 @@ bool settings_setParam(const String &param, const String &value)
 
     if (lowerParam == "audio.speakervolume")
     {
-        if (!isValidInteger(value)) { setSettingsErrorWithCode(ERR_INVALID_VALUE, "audio.speakerVolume expects a number"); return false; }
+        if (!isValidInteger(value))
+        {
+            setSettingsErrorWithCode(ERR_INVALID_VALUE, "audio.speakerVolume expects a number");
+            return false;
+        }
         int raw = value.toInt();
 
         if (raw < 0 || raw > 100)
@@ -4170,9 +4180,17 @@ bool settings_setParam(const String &param, const String &value)
 
     if (lowerParam == "audio.transmitvolume")
     {
-        if (!isValidInteger(value)) { setSettingsErrorWithCode(ERR_INVALID_VALUE, "audio.transmitVolume expects a number"); return false; }
+        if (!isValidInteger(value))
+        {
+            setSettingsErrorWithCode(ERR_INVALID_VALUE, "audio.transmitVolume expects a number");
+            return false;
+        }
         int raw = value.toInt();
-        if (raw < 0 || raw > 100) { setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "audio.transmitVolume must be 0-100"); return false; }
+        if (raw < 0 || raw > 100)
+        {
+            setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "audio.transmitVolume must be 0-100");
+            return false;
+        }
         uint8_t newValue = static_cast<uint8_t>(raw);
         if (appSettings.transmitVolume == newValue)
         {
@@ -4185,7 +4203,6 @@ bool settings_setParam(const String &param, const String &value)
         return settings_save();
     }
 
-#if defined(ECHO)
     if (lowerParam == "repeater.enabled")
     {
         String v = value;
@@ -4221,53 +4238,89 @@ bool settings_setParam(const String &param, const String &value)
         appSettings.repeaterMode = newValue;
         return settings_save();
     }
-#endif
 
     // CW settings (global). Note: setting does NOT auto-save; explicit save endpoint persists.
     if (lowerParam == "cw.wpm")
     {
-        if (!isValidInteger(value)) { setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.wpm expects a number"); return false; }
+        if (!isValidInteger(value))
+        {
+            setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.wpm expects a number");
+            return false;
+        }
         int raw = value.toInt();
-        if (raw < 5 || raw > 40) { setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.wpm must be 5-40"); return false; }
+        if (raw < 5 || raw > 40)
+        {
+            setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.wpm must be 5-40");
+            return false;
+        }
         uint8_t newValue = static_cast<uint8_t>(raw);
-        if (appSettings.cwWpm == newValue) return true;
+        if (appSettings.cwWpm == newValue)
+            return true;
         logSettingChange("cw.wpm", String(static_cast<unsigned>(appSettings.cwWpm)), String(static_cast<unsigned>(newValue)));
         appSettings.cwWpm = newValue;
         return true;
     }
     if (lowerParam == "cw.tonehz")
     {
-        if (!isValidInteger(value)) { setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.toneHz expects a number"); return false; }
+        if (!isValidInteger(value))
+        {
+            setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.toneHz expects a number");
+            return false;
+        }
         int raw = value.toInt();
-        if (raw < 200 || raw > 2000) { setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.toneHz must be 200-2000"); return false; }
+        if (raw < 200 || raw > 2000)
+        {
+            setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.toneHz must be 200-2000");
+            return false;
+        }
         uint16_t newValue = static_cast<uint16_t>(raw);
-        if (appSettings.cwToneHz == newValue) return true;
+        if (appSettings.cwToneHz == newValue)
+            return true;
         logSettingChange("cw.toneHz", String(static_cast<unsigned>(appSettings.cwToneHz)), String(static_cast<unsigned>(newValue)));
         appSettings.cwToneHz = newValue;
         return true;
     }
     if (lowerParam == "cw.volume")
     {
-        if (!isValidInteger(value)) { setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.volume expects a number"); return false; }
+        if (!isValidInteger(value))
+        {
+            setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.volume expects a number");
+            return false;
+        }
         int raw = value.toInt();
-        if (raw < 0 || raw > 100) { setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.volume must be 0-100"); return false; }
+        if (raw < 0 || raw > 100)
+        {
+            setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.volume must be 0-100");
+            return false;
+        }
         uint8_t newValue = static_cast<uint8_t>(raw);
-        if (appSettings.cwVolume == newValue) return true;
+        if (appSettings.cwVolume == newValue)
+            return true;
         logSettingChange("cw.volume", String(static_cast<unsigned>(appSettings.cwVolume)), String(static_cast<unsigned>(newValue)));
         appSettings.cwVolume = newValue;
         return true;
     }
     if (lowerParam == "cw.repeat")
     {
-        if (!isValidInteger(value)) { setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.repeat expects a number"); return false; }
+        if (!isValidInteger(value))
+        {
+            setSettingsErrorWithCode(ERR_INVALID_VALUE, "cw.repeat expects a number");
+            return false;
+        }
         int raw = value.toInt();
-        if (raw < 1 || raw > 10) { setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.repeat must be 1-10"); return false; }
+        if (raw < 1 || raw > 10)
+        {
+            setSettingsErrorWithCode(ERR_OUT_OF_RANGE, "cw.repeat must be 1-10");
+            return false;
+        }
         uint8_t newValue = static_cast<uint8_t>(raw);
-        if (appSettings.cwRepeat == newValue) return true;
+        if (appSettings.cwRepeat == newValue)
+            return true;
         logSettingChange("cw.repeat", String(static_cast<unsigned>(appSettings.cwRepeat)), String(static_cast<unsigned>(newValue)));
         appSettings.cwRepeat = newValue;
         return true;
     }
+#endif
 
     // Timezone settings
     if (lowerParam == "timezone.offsethours")
@@ -4630,7 +4683,6 @@ void settings_processSerial()
     
     // Static variable to track current directory for file management commands
     static String currentDirectory = "/";
-    
     // Read all available characters
     while (Serial.available() > 0)
     {
@@ -4651,7 +4703,7 @@ void settings_processSerial()
             {
                 String line = inputBuffer;
                 inputBuffer = ""; // Clear buffer for next command
-                
+
                 // Acquire Serial mutex to prevent interleaving with periodic status messages
                 bool mutexAcquired = acquireSerialMutex();
                 
@@ -4831,8 +4883,9 @@ void settings_processSerial()
 
                     if (payload == "?")
                     {
-                        sendConfigMessage();
+                        sendConfigMessage(true); // CLI already holds serial mutex
                         cliOk();
+                        RELEASE_AND_BREAK();
                         break;
                     }
 
@@ -4854,12 +4907,13 @@ void settings_processSerial()
                         bool sdAvailable = ensureStorage() && isStorageModeSdCard();
                         if (sdAvailable)
                         {
-                            uint64_t sdTotal = SD_MMC.totalBytes();
-                            uint64_t sdUsed = SD_MMC.usedBytes();
+                            uint64_t sdTotal = sd_bus::totalBytes();
+                            uint64_t sdUsed = sd_bus::usedBytes();
                             snap["sdTotalBytes"] = static_cast<int64_t>(sdTotal);
                             snap["sdFreeBytes"] = static_cast<int64_t>((sdTotal > sdUsed) ? (sdTotal - sdUsed) : 0);
                         }
                         cliJsonResponse(snap);
+                        RELEASE_AND_BREAK();
                         break;
                     }
 
@@ -4890,6 +4944,7 @@ void settings_processSerial()
                     {
                         String err = settings_getLastError();
                         cliError(ERR_INVALID_VALUE, err.length() > 0 ? err : "failed to apply settings");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5332,6 +5387,7 @@ void settings_processSerial()
                         doc["wifiTxPower"] = static_cast<unsigned>(appSettings.wifiTxPower);
                         doc["esp32Value"] = static_cast<unsigned>(mapWifiTxPowerLevel(appSettings.wifiTxPower));
                         cliJsonResponse(doc);
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5339,6 +5395,7 @@ void settings_processSerial()
                     if (value < 1 || value > 10)
                     {
                         cliError(ERR_OUT_OF_RANGE, "TX power must be 1-10");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5371,6 +5428,7 @@ void settings_processSerial()
                     if (rest.length() == 0)
                     {
                         cliOk("webserverEnabled", appSettings.webserverEnabled ? "true" : "false");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5382,6 +5440,7 @@ void settings_processSerial()
                     if (oldValue == newValue)
                     {
                         cliOk("webserverEnabled", newValue ? "true" : "false");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5406,6 +5465,7 @@ void settings_processSerial()
                     if (rest.length() == 0)
                     {
                         cliError(ERR_MISSING_PARAM, "usage: settime <YYYY-MM-DDTHH:MM:SSZ> or <epoch_seconds>");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5432,12 +5492,14 @@ void settings_processSerial()
                     if (!parsed)
                     {
                         cliError(ERR_INVALID_VALUE, "invalid time format, use ISO (YYYY-MM-DDTHH:MM:SSZ) or epoch seconds");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
                     if (!isEpochValid(epochSeconds))
                     {
                         cliError(ERR_OUT_OF_RANGE, "epoch time must be >= 2021-01-01");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -5465,6 +5527,7 @@ void settings_processSerial()
                     if (!settings_factoryReset(true))
                     {
                         cliError(ERR_HW_ERROR, "cannot open NVS settings namespace");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     return;
@@ -5508,8 +5571,18 @@ void settings_processSerial()
                 }
                 else if (cmd == "SUMMARY" || cmd == "UPDATESUMMARY")
                 {
-                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); break; }
-                    if (!timeKeeper().timeIsValid()) { cliError(ERR_HW_ERROR, "time not synced"); break; }
+                    if (!isStorageModeSdCard()) 
+                    {
+                        cliError(ERR_HW_ERROR, "SD card not available");
+                        RELEASE_AND_BREAK(); 
+                        break;
+                    }
+                    if (!timeKeeper().timeIsValid())
+                    {
+                        cliError(ERR_HW_ERROR, "time not synced");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     time_t now = time(nullptr);
                     struct tm* timeInfo = localtime(&now);
@@ -5530,11 +5603,21 @@ void settings_processSerial()
                 }
                 else if (cmd == "PUSHLOGS" || cmd == "UPLOADLOGS" || cmd == "PUSHLOG" || cmd == "UPLOADLOG")
                 {
-                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); break; }
+                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); RELEASE_AND_BREAK(); break; }
                     
                     String logPath = getLatestLogPath();
-                    if (logPath.isEmpty()) { cliError(ERR_HW_ERROR, "time not synced, cannot determine log path"); break; }
-                    if (!SD_MMC.exists(logPath)) { cliError(ERR_HW_ERROR, String("log file not found: ") + logPath); break; }
+                    if (logPath.isEmpty())
+                    {
+                        cliError(ERR_HW_ERROR, "time not synced, cannot determine log path");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
+                    if (!sd_bus::exists(logPath))
+                    {
+                        cliError(ERR_HW_ERROR, String("log file not found: ") + logPath);
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     if (uploadLogFile(logPath))
                     {
@@ -5547,16 +5630,22 @@ void settings_processSerial()
                 }
                 else if (cmd == "FORMAT" || cmd == "FORMATSD" || cmd == "FORMATSDCARD")
                 {
-                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); break; }
-                    File root = SD_MMC.open("/");
+                    if (!isStorageModeSdCard())
+                    {
+                        cliError(ERR_HW_ERROR, "SD card not available");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
+                    sd_bus::SdFile root = sd_bus::open("/");
                     if (!root || !root.isDirectory())
                     {
                         if (root) root.close();
                         cliError(ERR_HW_ERROR, "cannot open root directory");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
-                    File file = root.openNextFile();
+                    sd_bus::SdFile file = root.openNextFile();
                     while (file)
                     {
                         String fileName = String(file.name());
@@ -5565,25 +5654,25 @@ void settings_processSerial()
                         {
                             if (fileName != "." && fileName != "..")
                             {
-                                File subDir = SD_MMC.open(filePath);
+                                sd_bus::SdFile subDir = sd_bus::open(filePath);
                                 if (subDir && subDir.isDirectory())
                                 {
-                                    File subFile = subDir.openNextFile();
+                                    sd_bus::SdFile subFile = subDir.openNextFile();
                                     while (subFile)
                                     {
                                         String subPath = String(subFile.name());
-                                        if (subFile.isDirectory()) { subFile.close(); SD_MMC.rmdir(subPath); }
-                                        else { subFile.close(); SD_MMC.remove(subPath); }
+                                        if (subFile.isDirectory()) { subFile.close(); sd_bus::rmdir(subPath); }
+                                        else { subFile.close(); sd_bus::remove(subPath); }
                                         subFile = subDir.openNextFile();
                                     }
                                     subDir.close();
                                 }
-                                SD_MMC.rmdir(filePath);
+                                sd_bus::rmdir(filePath);
                             }
                         }
                         else
                         {
-                            SD_MMC.remove(filePath);
+                            sd_bus::remove(filePath);
                         }
                         file.close();
                         file = root.openNextFile();
@@ -5591,11 +5680,11 @@ void settings_processSerial()
                     }
                     root.close();
                     
-                    SD_MMC.end();
+                    sd_bus::unmount();
                     delay(500);
                     const bool mode1bit = appSettings.sdCard.mode1bit;
                     const uint32_t frequency = appSettings.sdCard.frequency;
-                    if (SD_MMC.begin("/sdcard", mode1bit, false, frequency, SD_MMC_MAX_OPEN_FILES))
+                    if (sd_bus::mount("/sdcard", mode1bit, false, frequency, SD_MMC_MAX_OPEN_FILES))
                     {
                         cliOk();
                     }
@@ -5636,8 +5725,8 @@ void settings_processSerial()
                     if (sdAvailable)
                     {
                         // Only read SD card stats if available (may be slow, but status command is not time-critical)
-                        uint64_t sdTotal = SD_MMC.totalBytes();
-                        uint64_t sdUsed = SD_MMC.usedBytes();
+                        uint64_t sdTotal = sd_bus::totalBytes();
+                        uint64_t sdUsed = sd_bus::usedBytes();
                         uint64_t sdFree = (sdTotal > sdUsed) ? (sdTotal - sdUsed) : 0;
                         // Calculate free percentage with 2 decimal places
                         if (sdTotal > 0)
@@ -5920,25 +6009,55 @@ void settings_processSerial()
                 }
                 else if (cmd == "CD" || cmd == "CHDIR")
                 {
-                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); break; }
+                    if (!isStorageModeSdCard())
+                    {
+                        cliError(ERR_HW_ERROR, "SD card not available");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     String rest = (firstSpace == -1) ? String() : line.substring(firstSpace + 1);
                     rest.trim();
                     
-                    if (rest.length() == 0) { cliOk("directory", currentDirectory); break; }
+                    if (rest.length() == 0)
+                    {
+                        cliOk("directory", currentDirectory);
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     String targetPath = currentDirectory;
-                    if (rest == "/") { targetPath = "/"; }
-                    else if (rest.startsWith("/")) { targetPath = rest; }
-                    else { if (!currentDirectory.endsWith("/")) targetPath += "/"; targetPath += rest; }
+                    if (rest == "/")
+                    {
+                        targetPath = "/";
+                    }
+                    else if (rest.startsWith("/"))
+                    {
+                        targetPath = rest;
+                    }
+                    else
+                    {
+                        if (!currentDirectory.endsWith("/")) targetPath += "/"; targetPath += rest;
+                    }
                     
                     targetPath.replace("//", "/");
                     if (targetPath.endsWith("/") && targetPath.length() > 1) targetPath.remove(targetPath.length() - 1);
                     
-                    if (!SD_MMC.exists(targetPath)) { cliError(ERR_HW_ERROR, String("directory not found: ") + targetPath); break; }
+                    if (!sd_bus::exists(targetPath))
+                    {
+                        cliError(ERR_HW_ERROR, String("directory not found: ") + targetPath);
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
-                    File dir = SD_MMC.open(targetPath);
-                    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); cliError(ERR_HW_ERROR, String("not a directory: ") + targetPath); break; }
+                    sd_bus::SdFile dir = sd_bus::open(targetPath);
+                    if (!dir || !dir.isDirectory())
+                    {
+                        if (dir) dir.close();
+                        cliError(ERR_HW_ERROR, String("not a directory: ") + targetPath);
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     dir.close();
                     
                     currentDirectory = targetPath;
@@ -5946,18 +6065,34 @@ void settings_processSerial()
                 }
                 else if (cmd == "DIR" || cmd == "LS" || cmd == "LIST")
                 {
-                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); break; }
-                    if (!ensureStorage()) { cliError(ERR_HW_ERROR, "storage not initialized"); break; }
+                    if (!isStorageModeSdCard())
+                    {
+                        cliError(ERR_HW_ERROR, "SD card not available");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
+                    if (!ensureStorage())
+                    {
+                        cliError(ERR_HW_ERROR, "storage not initialized");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
-                    File dir = SD_MMC.open(currentDirectory);
-                    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); cliError(ERR_HW_ERROR, String("cannot open: ") + currentDirectory); break; }
+                    sd_bus::SdFile dir = sd_bus::open(currentDirectory);
+                    if (!dir || !dir.isDirectory())
+                    {
+                        if (dir) dir.close();
+                        cliError(ERR_HW_ERROR, String("cannot open: ") + currentDirectory);
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     DynamicJsonDocument doc(4096);
                     doc["directory"] = currentDirectory;
                     JsonArray entries = doc.createNestedArray("entries");
                     int fileCount = 0, dirCount = 0;
                     
-                    File file = dir.openNextFile();
+                    sd_bus::SdFile file = dir.openNextFile();
                     while (file)
                     {
                         String fileName = String(file.name());
@@ -5969,8 +6104,16 @@ void settings_processSerial()
                         
                         JsonObject entry = entries.createNestedObject();
                         entry["name"] = fileName;
-                        if (file.isDirectory()) { entry["type"] = "dir"; dirCount++; }
-                        else { entry["type"] = "file"; entry["size"] = static_cast<int64_t>(file.size()); fileCount++; }
+                        if (file.isDirectory())
+                        {
+                            entry["type"] = "dir"; dirCount++;
+                        }
+                        else
+                        {
+                            entry["type"] = "file";
+                            entry["size"] = static_cast<int64_t>(file.size());
+                            fileCount++;
+                        }
                         file.close();
                         file = dir.openNextFile();
                     }
@@ -5982,26 +6125,55 @@ void settings_processSerial()
                 }
                 else if (cmd == "RM" || cmd == "DELETE" || cmd == "DEL")
                 {
-                    if (!isStorageModeSdCard()) { cliError(ERR_HW_ERROR, "SD card not available"); break; }
-                    if (!ensureStorage()) { cliError(ERR_HW_ERROR, "storage not initialized"); break; }
+                    if (!isStorageModeSdCard())
+                    {
+                        cliError(ERR_HW_ERROR, "SD card not available");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
+                    if (!ensureStorage())
+                    {
+                        cliError(ERR_HW_ERROR, "storage not initialized");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     String rest = (firstSpace == -1) ? String() : line.substring(firstSpace + 1);
                     rest.trim();
                     
-                    if (rest.length() == 0) { cliError(ERR_MISSING_PARAM, "usage: rm <filename> or rm *"); break; }
+                    if (rest.length() == 0)
+                    {
+                        cliError(ERR_MISSING_PARAM, "usage: rm <filename> or rm *");
+                        RELEASE_AND_BREAK();
+                        break;
+                    }
                     
                     if (rest == "*")
                     {
-                        File dir = SD_MMC.open(currentDirectory);
-                        if (!dir || !dir.isDirectory()) { if (dir) dir.close(); cliError(ERR_HW_ERROR, String("cannot open: ") + currentDirectory); break; }
+                        sd_bus::SdFile dir = sd_bus::open(currentDirectory);
+                        if (!dir || !dir.isDirectory())
+                        {
+                            if (dir) dir.close();
+                            cliError(ERR_HW_ERROR, String("cannot open: ") + currentDirectory);
+                            RELEASE_AND_BREAK();
+                            break;
+                        }
                         
                         int deletedCount = 0, failedCount = 0;
-                        File file = dir.openNextFile();
+                        sd_bus::SdFile file = dir.openNextFile();
                         while (file)
                         {
                             String filePath = String(file.name());
-                            if (!file.isDirectory()) { file.close(); if (SD_MMC.remove(filePath)) deletedCount++; else failedCount++; }
-                            else { file.close(); }
+                            if (!file.isDirectory())
+                            {
+                                file.close();
+                                if (sd_bus::remove(filePath)) deletedCount++; 
+                                else failedCount++;
+                            }
+                            else
+                            {
+                                file.close();
+                            }
                             file = dir.openNextFile();
                         }
                         dir.close();
@@ -6014,18 +6186,41 @@ void settings_processSerial()
                     else
                     {
                         String targetPath = currentDirectory;
-                        if (rest.startsWith("/")) { targetPath = rest; }
-                        else { if (!currentDirectory.endsWith("/")) targetPath += "/"; targetPath += rest; }
+                        if (rest.startsWith("/"))
+                        {
+                            targetPath = rest;
+                        }
+                        else
+                        {
+                            if (!currentDirectory.endsWith("/")) targetPath += "/"; targetPath += rest;
+                        }
                         targetPath.replace("//", "/");
                         
-                        if (!SD_MMC.exists(targetPath)) { cliError(ERR_HW_ERROR, String("file not found: ") + targetPath); break; }
+                        if (!sd_bus::exists(targetPath))
+                        {
+                            cliError(ERR_HW_ERROR, String("file not found: ") + targetPath);
+                            RELEASE_AND_BREAK();
+                            break;
+                        }
                         
-                        File checkFile = SD_MMC.open(targetPath);
-                        if (checkFile && checkFile.isDirectory()) { checkFile.close(); cliError(ERR_INVALID_VALUE, "cannot delete directory"); break; }
+                        sd_bus::SdFile checkFile = sd_bus::open(targetPath);
+                        if (checkFile && checkFile.isDirectory())
+                        {
+                            checkFile.close();
+                            cliError(ERR_INVALID_VALUE, "cannot delete directory");
+                            RELEASE_AND_BREAK();
+                            break;
+                        }
                         if (checkFile) checkFile.close();
                         
-                        if (SD_MMC.remove(targetPath)) { cliOk("deleted", targetPath); }
-                        else { cliError(ERR_HW_ERROR, String("could not delete: ") + targetPath); }
+                        if (sd_bus::remove(targetPath))
+                        {
+                            cliOk("deleted", targetPath);
+                        }
+                        else
+                        {
+                            cliError(ERR_HW_ERROR, String("could not delete: ") + targetPath);
+                        }
                     }
                 }
                 else if (cmd == "RECOVER" || cmd == "RECOVERY")
@@ -6039,6 +6234,7 @@ void settings_processSerial()
                     if (!isWiFiConnected())
                     {
                         cliError(ERR_HW_ERROR, "WiFi not connected");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
@@ -6052,19 +6248,9 @@ void settings_processSerial()
                 }
                 else if (cmd == "RECONNECT" || cmd == "RECONNECTWIFI" || cmd == "WIFI_RECONNECT")
                 {
-                    WiFi.disconnect(true, true);
-                    delay(500);
-                    WiFi.mode(WIFI_OFF);
-                    delay(500);
-                    WiFi.mode(WIFI_STA);
-                    network_reinitializeWiFi();
-                    delay(500);
-                    connectToWiFi();
-                    delay(1000);
-                    
+                    network_reconnectWiFi();
+
                     bool connected = isWiFiConnected();
-                    if (connected) network_invalidateApiEndpoints();
-                    
                     DynamicJsonDocument doc(256);
                     doc["connected"] = connected;
                     if (connected) doc["ip"] = WiFi.localIP().toString();
@@ -6075,6 +6261,7 @@ void settings_processSerial()
                     if (recorder_isRecording())
                     {
                         cliError(ERR_BUSY, "recording already in progress");
+                        RELEASE_AND_BREAK();
                         break;
                     }
                     
