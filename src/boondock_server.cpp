@@ -6,7 +6,7 @@
 #include <freertos/task.h>
 #include <esp_wifi.h>
 #include <esp_task_wdt.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <HTTPClient.h>
 #include <Update.h>
 #include <functional>
@@ -125,7 +125,7 @@ namespace
             // Extract prefix from FIRMWARE (everything before first dash)
             String firmware = String(FIRMWARE);
             int dashIndex = firmware.indexOf('-');
-            String prefix = (dashIndex > 0) ? firmware.substring(0, dashIndex) : "TANGO";
+            String prefix = (dashIndex > 0) ? firmware.substring(0, dashIndex) : "EDGE";
             
             // Format: "Boondock-<PREFIX> V-<FIRMWARE>"
             String userAgent = "Boondock-" + prefix + " V-" + firmware;
@@ -947,9 +947,9 @@ static void handleMainSPA()
     if (isStorageModeSdCard())
     {
         const String p = system_assets_localSpaIndexPath();
-        if (p.length() > 0 && SD_MMC.exists(p))
+        if (p.length() > 0 && sd_bus::exists(p))
         {
-            File f = SD_MMC.open(p, FILE_READ);
+            sd_bus::SdFile f = sd_bus::open(p, FILE_READ);
             if (f)
             {
                 mainWebServer->streamFile(f, "text/html");
@@ -974,9 +974,9 @@ static void handleMainCSS()
     if (isStorageModeSdCard())
     {
         const String p = system_assets_localSpaCssPath();
-        if (p.length() > 0 && SD_MMC.exists(p))
+        if (p.length() > 0 && sd_bus::exists(p))
         {
-            File f = SD_MMC.open(p, FILE_READ);
+            sd_bus::SdFile f = sd_bus::open(p, FILE_READ);
             if (f)
             {
                 mainWebServer->streamFile(f, "text/css");
@@ -1001,9 +1001,9 @@ static void handleMainJS()
     if (isStorageModeSdCard())
     {
         const String p = system_assets_localSpaJsPath();
-        if (p.length() > 0 && SD_MMC.exists(p))
+        if (p.length() > 0 && sd_bus::exists(p))
         {
-            File f = SD_MMC.open(p, FILE_READ);
+            sd_bus::SdFile f = sd_bus::open(p, FILE_READ);
             if (f)
             {
                 mainWebServer->streamFile(f, "application/javascript");
@@ -1118,8 +1118,9 @@ static bool recordingsFolderEntrySkip(const String &name)
     return name == "1970";
 }
 
-// WebServer shares the SD bus with other tasks; aggressive SD scans can trigger mmc read errors (e.g. 257).
-// Yield often and for a few ms so other work (WDT, SD driver, WiFi) can run between reads.
+// WebServer shares the SD bus (sd_bus) with Record/Upload/Logger. Each open/read/seek
+// takes the lock only for that call. Yield between directory entries and stream chunks
+// so other tasks can acquire the bus; never hold a Guard across sendContent/Wi-Fi.
 static constexpr uint32_t kRecordingsSdEntriesPerYield = 8u;
 static constexpr uint32_t kRecordingsSdYieldDelayMs = 3u;
 static constexpr uint32_t kRecordingsStreamChunksPerYield = 4u; // smaller chunks → more yields for SD sharing
@@ -1190,11 +1191,11 @@ static void handleMainRecordingsFolders()
         apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, "invalid path");
         return;
     }
-    if (canon == "/recordings" && !SD_MMC.exists("/recordings"))
+    if (canon == "/recordings" && !sd_bus::exists("/recordings"))
     {
         storage_ensureDirectoryPath("/recordings");
     }
-    if (!SD_MMC.exists(canon))
+    if (!sd_bus::exists(canon))
     {
         apiError(mainWebServer, 404, API_ERR_NOT_FOUND, "path not found");
         return;
@@ -1219,7 +1220,7 @@ static void handleMainRecordingsFolders()
         return;
     }
 
-    File dir = SD_MMC.open(canon);
+    sd_bus::SdFile dir = sd_bus::open(canon);
     if (!dir || !dir.isDirectory())
     {
         apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, "not a directory");
@@ -1231,7 +1232,7 @@ static void handleMainRecordingsFolders()
     uint32_t entryCount = 0;
     for (;;)
     {
-        File entry = dir.openNextFile();
+        sd_bus::SdFile entry = dir.openNextFile();
         if (!entry)
         {
             break;
@@ -1304,7 +1305,7 @@ static void handleMainRecordingsList()
         apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, "path must be a day folder /recordings/YYYY/MM/DD");
         return;
     }
-    if (!SD_MMC.exists(canon))
+    if (!sd_bus::exists(canon))
     {
         apiError(mainWebServer, 404, API_ERR_NOT_FOUND, "path not found");
         return;
@@ -1356,9 +1357,9 @@ static void handleMainRecordingsList()
         String endReason;
     };
     std::vector<SummaryRow> rows;
-    if (SD_MMC.exists(summaryPath))
+    if (sd_bus::exists(summaryPath))
     {
-        File sumFile = SD_MMC.open(summaryPath, FILE_READ);
+        sd_bus::SdFile sumFile = sd_bus::open(summaryPath, FILE_READ);
         if (sumFile)
         {
             while (sumFile.available())
@@ -1514,7 +1515,7 @@ static void handleMainRecordingsSummary()
         apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, "path must be a day folder /recordings/YYYY/MM/DD");
         return;
     }
-    if (!SD_MMC.exists(canon))
+    if (!sd_bus::exists(canon))
     {
         apiError(mainWebServer, 404, API_ERR_NOT_FOUND, "path not found");
         return;
@@ -1527,14 +1528,14 @@ static void handleMainRecordingsSummary()
     }
 
     const String summaryPath = canon + "/summary.json";
-    if (!SD_MMC.exists(summaryPath))
+    if (!sd_bus::exists(summaryPath))
     {
         mainWebServer->sendHeader("Cache-Control", "no-store");
         mainWebServer->send(200, "application/x-ndjson", "");
         return;
     }
 
-    File f = SD_MMC.open(summaryPath, FILE_READ);
+    sd_bus::SdFile f = sd_bus::open(summaryPath, FILE_READ);
     if (!f || f.isDirectory())
     {
         mainWebServer->sendHeader("Cache-Control", "no-store");
@@ -1611,10 +1612,10 @@ static void handleMainRecordingsStream()
     }
 
     String pathToOpen = canon;
-    if (!SD_MMC.exists(canon))
+    if (!sd_bus::exists(canon))
     {
         String pendingPath;
-        if (!recordings_inboxToPendingPath(canon, pendingPath) || !SD_MMC.exists(pendingPath))
+        if (!recordings_inboxToPendingPath(canon, pendingPath) || !sd_bus::exists(pendingPath))
         {
             apiError(mainWebServer, 404, API_ERR_NOT_FOUND, "file not found for playback");
             return;
@@ -1629,7 +1630,7 @@ static void handleMainRecordingsStream()
         return;
     }
 
-    File f = SD_MMC.open(pathToOpen, FILE_READ);
+    sd_bus::SdFile f = sd_bus::open(pathToOpen, FILE_READ);
     if (!f || f.isDirectory())
     {
         apiError(mainWebServer, 404, API_ERR_NOT_FOUND, "file not found for playback");
@@ -1757,21 +1758,16 @@ static void handleMainHomeSummary()
                      String(stats.errorCount) + "|" +
                      String(ESP.getFreeHeap() / 1024) + "|" +
                      String(system_getUploadQueueSize());
-
+#if defined(ECHO)
     // Include TX/repeater state in change detection so UI updates immediately.
     hashStr += "|" + String(appSettings.transmitEnabled ? "TX1" : "TX0");
-#if defined(ECHO)
-    hashStr += "|" + String(appSettings.repeaterEnabled ? "RE1" : "RE0") + "|" + String(static_cast<unsigned>(appSettings.repeaterMode));
-#endif
-
-#if defined(ECHO)
     hashStr += "|" + String(appSettings.repeaterEnabled ? "RE1" : "RE0") + "|" + String(static_cast<unsigned>(appSettings.repeaterMode));
 #endif
     
     if (isStorageModeSdCard())
     {
-        uint64_t totalBytes = SD_MMC.totalBytes();
-        uint64_t usedBytes = SD_MMC.usedBytes();
+        uint64_t totalBytes = sd_bus::totalBytes();
+        uint64_t usedBytes = sd_bus::usedBytes();
         hashStr += "|" + String(totalBytes) + "|" + String(usedBytes);
     }
     else
@@ -1830,10 +1826,9 @@ static void handleMainHomeSummary()
     doc["errorCount"] = stats.errorCount;
     doc["warningCount"] = stats.errorCount; // Treat current error counter as warning count for UI KPI
 
+#if defined(ECHO)
     // TX status (used by SPA to gate repeater controls)
     doc["transmitEnabled"] = appSettings.transmitEnabled;
-
-#if defined(ECHO)
     doc["repeaterEnabled"] = appSettings.repeaterEnabled;
     doc["repeaterMode"] = static_cast<unsigned>(appSettings.repeaterMode);
     doc["repeaterModeLabel"] = (appSettings.repeaterMode == 2) ? "Duplex" : "Simplex";
@@ -1843,8 +1838,8 @@ static void handleMainHomeSummary()
     if (isStorageModeSdCard())
     {
         doc["storageMode"] = "SD Card";
-        uint64_t totalBytes = SD_MMC.totalBytes();
-        uint64_t usedBytes = SD_MMC.usedBytes();
+        uint64_t totalBytes = sd_bus::totalBytes();
+        uint64_t usedBytes = sd_bus::usedBytes();
         uint64_t freeBytes = totalBytes - usedBytes;
         // Total size in GB with 2 decimal places
         float totalGB = totalBytes / (1024.0f * 1024.0f * 1024.0f);
@@ -1966,6 +1961,8 @@ static void handleMainAudioSettings()
 #if defined(BOONDOCK_HAS_RECORD_INPUT_CHANNEL)
     doc["recordInputChannel"] = appSettings.audio.recordInputChannel;
 #endif
+
+#if defined(ECHO)
     doc["speakerEnabled"] = appSettings.speakerEnabled;
     doc["speakerVolume"] = static_cast<unsigned>(appSettings.speakerVolume);
     doc["transmitEnabled"] = appSettings.transmitEnabled;
@@ -1974,6 +1971,7 @@ static void handleMainAudioSettings()
     doc["cwToneHz"] = static_cast<unsigned>(appSettings.cwToneHz);
     doc["cwVolume"] = static_cast<unsigned>(appSettings.cwVolume);
     doc["cwRepeat"] = static_cast<unsigned>(appSettings.cwRepeat);
+#endif
     
     String response;
     serializeJson(doc, response);
@@ -2408,8 +2406,8 @@ static void handleMainSdCardTest()
     else
     {
         // Report basic SD card info
-        uint64_t total = SD_MMC.totalBytes();
-        uint64_t used = SD_MMC.usedBytes();
+        uint64_t total = sd_bus::totalBytes();
+        uint64_t used = sd_bus::usedBytes();
         uint64_t freeBytes = (total > used) ? (total - used) : 0;
 
         float totalMB = total / (1024.0f * 1024.0f);
@@ -2422,7 +2420,7 @@ static void handleMainSdCardTest()
         doc["usedMB"] = usedMB;
         doc["freeMB"] = freeMB;
 
-        uint8_t cardType = SD_MMC.cardType();
+        uint8_t cardType = sd_bus::cardType();
         const char* typeStr = "UNKNOWN";
         if (cardType == CARD_NONE)
             typeStr = "NONE";
@@ -3670,8 +3668,8 @@ void boondock_server_pushHomeData()
     
     if (isStorageModeSdCard())
     {
-        uint64_t totalBytes = SD_MMC.totalBytes();
-        uint64_t usedBytes = SD_MMC.usedBytes();
+        uint64_t totalBytes = sd_bus::totalBytes();
+        uint64_t usedBytes = sd_bus::usedBytes();
         hashStr += "|" + String(totalBytes) + "|" + String(usedBytes);
     }
     else
@@ -3739,10 +3737,9 @@ void boondock_server_pushHomeData()
     doc["errorCount"] = stats.errorCount;
     doc["warningCount"] = stats.errorCount;
 
+#if defined(ECHO)
     // TX status (used by SPA to gate repeater controls)
     doc["transmitEnabled"] = appSettings.transmitEnabled;
-
-#if defined(ECHO)
     doc["repeaterEnabled"] = appSettings.repeaterEnabled;
     doc["repeaterMode"] = static_cast<unsigned>(appSettings.repeaterMode);
     doc["repeaterModeLabel"] = (appSettings.repeaterMode == 2) ? "Duplex" : "Simplex";
@@ -3751,8 +3748,8 @@ void boondock_server_pushHomeData()
     if (isStorageModeSdCard())
     {
         doc["storageMode"] = "SD Card";
-        uint64_t totalBytes = SD_MMC.totalBytes();
-        uint64_t usedBytes = SD_MMC.usedBytes();
+        uint64_t totalBytes = sd_bus::totalBytes();
+        uint64_t usedBytes = sd_bus::usedBytes();
         uint64_t freeBytes = totalBytes - usedBytes;
         float totalGB = totalBytes / (1024.0f * 1024.0f * 1024.0f);
         doc["storageTotalGB"] = String(totalGB, 2);

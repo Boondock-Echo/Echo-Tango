@@ -1,0 +1,164 @@
+=== TEST RUN ===
+{
+  "name": "Basic Wifi setup",
+  "startTime": 1773742942862,
+  "endTime": null,
+  "results": [
+    {
+      "id": "step-1",
+      "index": 0,
+      "name": "Start logging",
+      "type": "start_logging",
+      "status": "passed",
+      "message": "Serial logging started (infinite)",
+      "duration": 0
+    },
+    {
+      "id": "step-2",
+      "index": 1,
+      "name": "factory",
+      "type": "command",
+      "status": "passed",
+      "message": "> factory\r\n{\"status\":\"ok\",\"action\":\"factory_reset\",\"reboot_pending\":true}\r\n",
+      "duration": 0.85
+    },
+    {
+      "id": "step-3",
+      "index": 2,
+      "name": "Wait 10s",
+      "type": "wait",
+      "status": "passed",
+      "message": "Waited 10.0s",
+      "duration": 10.01
+    },
+    {
+      "id": "step-4",
+      "index": 3,
+      "name": "set ssid AAA",
+      "type": "command",
+      "status": "passed",
+      "message": "> set ssid AAA\r\n{\"status\":\"ok\",\"ssid\":\"AAA\"}\r\n{\"tm\":\"10:22:43\",\"ty\":\"config\",\"ath\":50,\"mrm\":1000,\"xrm\":30000,\"stm\":1000,\"prm\":200,\"cg\":0,\"is\":8000,\"rsc\":false,\"mc\":\"345F45243E78\",\"si\":\"37596781\"}\n{\"tm...",
+      "duration": 0.2
+    },
+    {
+      "id": "step-5",
+      "index": 4,
+      "name": "Wait 1s",
+      "type": "wait",
+      "status": "passed",
+      "message": "Waited 1.0s",
+      "duration": 1
+    },
+    {
+      "id": "step-6",
+      "index": 5,
+      "name": "set pass 608980608980",
+      "type": "command",
+      "status": "passed",
+      "message": "> set pass 608980608980\r\n{\"status\":\"ok\",\"pass\":\"608980608980\"}\r\n",
+      "duration": 0.2
+    },
+    {
+      "id": "step-7",
+      "index": 6,
+      "name": "Wait 5s",
+      "type": "wait",
+      "status": "passed",
+      "message": "Waited 5.0s",
+      "duration": 5
+    },
+    {
+      "id": "step-8",
+      "index": 7,
+      "name": "save",
+      "type": "command",
+      "status": "passed",
+      "message": "> save\r\n{\"status\":\"ok\"}\r\n",
+      "duration": 0.25
+    },
+    {
+      "id": "step-9",
+      "index": 8,
+      "name": "Wait 5s",
+      "type": "wait",
+      "status": "passed",
+      "message": "Waited 5.0s",
+      "duration": 5.01
+    },
+    {
+      "id": "step-10",
+      "index": 9,
+      "name": "reboot",
+      "type": "command",
+      "status": "passed",
+      "message": "> reboot\r\n{\"status\":\"ok\"}\r\n",
+      "duration": 0.15
+    },
+    {
+      "id": "step-11",
+      "index": 10,
+      "name": "Wait for: 'complete'",
+      "type": "wait_for_response",
+      "status": "passed",
+      "message": "Found: 'complete'",
+      "duration": 11.82
+    }
+  ]
+}
+
+=== SERIAL LOG ===
+
+> factory
+{"status":"ok","action":"factory_reset","reboot_pending":true}
+ets Jul 29 2019 12:21:46
+
+rst:0xc (SW_CPU_RESET),boot:0x1f (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:1184
+load:0x40078000,len:13232
+load:0x40080400,len:3028
+entry 0x400805e4
+{"tm":"10:22:37","ty":"log","lv":"info","ms":"INIT - Reset reason: Software Reset (3)","rr":"Software Reset","mc":"345F45243E78","si":"37596781"}
+���[Startup] ERROR: No WiFi credentials configured
+⚠️[Startup] Device will start in setup mode so you can configure WiFi
+⚠️[Startup] No WiFi credentials - starting Access Point setup mode
+⚠️[AP] Setup mode enabled (WiFi credentials not configured)
+⚠���[AP] Step 1: Connect to WiFi SSID 'Boondock-AP' (password: boondockecho)
+⚠��[AP] Step 2: Open http://192.168.4.1 in your browser
+��️[AP] Step 3: Enter WiFi credentials and save settings
+���️[AP] Access Point started successfully
+⚠️[AP] SSID: Boondock-AP
+⚠️[AP] Password: boondockecho
+��️[AP] Device IP: 192.168.4.1
+��️[AP] Setup page: http://192.168.4.1
+{"ty":"ready","tm":"10:22:41","ms":"Device setup complete","mc":"345F45243E78","si":"37596781","dv":true,"nw":false,"ip":"","ba":false,"ti":true,"re":true,"sd":true}
+> set ssid AAA
+{"status":"ok","ssid":"AAA"}
+{"tm":"10:22:43","ty":"config","ath":50,"mrm":1000,"xrm":30000,"stm":1000,"prm":200,"cg":0,"is":8000,"rsc":false,"mc":"345F45243E78","si":"37596781"}
+{"tm":"10:22:43","ty":"config","fw":"EDGE-2026-03-16","ho":"3.128.235.120","po":7001,"ss":"AAA","sie":false,"rte":true,"usc":true,"oh":0,"wtp":10,"mc":"345F45243E78","si":"37596781"}
+{"tm":"10:22:43","ty":"short","rg":false,"ug":false,"cd":-120,"mi":0,"mx":-120,"mc":"345F45243E78","si":"37596781"}
+> set pass 608980608980
+{"status":"ok","pass":"608980608980"}
+{"tm":"10:22:50","ty":"config","ath":50,"mrm":1000,"xrm":30000,"stm":1000,"prm":200,"cg":0,"is":8000,"rsc":false,"mc":"345F45243E78","si":"37596781"}
+{"tm":"10:22:50","ty":"config","fw":"EDGE-2026-03-16","ho":"3.128.235.120","po":7001,"ss":"AAA","sie":false,"rte":true,"usc":true,"oh":0,"wtp":10,"mc":"345F45243E78","si":"37596781"}
+> save
+{"status":"ok"}
+> reboot
+{"status":"ok"}
+ets Jul 29 2019 12:21:46
+
+rst:0xc (SW_CPU_RESET),boot:0x1f (SPI_FAST_FLASH_BOOT)
+configsip: 0, SPIWP:0xee
+clk_drv:0x00,q_drv:0x00,d_drv:0x00,cs0_drv:0x00,hd_drv:0x00,wp_drv:0x00
+mode:DIO, clock div:2
+load:0x3fff0030,len:1184
+load:0x40078000,len:13232
+load:0x40080400,len:3028
+entry 0x400805e4
+{"tm":"10:23:02","ty":"log","lv":"info","ms":"INIT - Reset reason: Software Reset (3)","rr":"Software Reset","mc":"345F45243E78","si":"54999439"}
+{"tm":"10:23:07","ty":"config","ath":50,"mrm":1000,"xrm":30000,"stm":1000,"prm":200,"cg":0,"is":8000,"rsc":false,"mc":"345F45243E78","si":"54999439"}
+{"ty":"ready","tm":"10:23:07","ms":"Device setup complete","mc":"345F45243E78","si":"54999439","dv":true,"nw":true,"ip":"10.0.2.30","ba":false,"ti":true,"re":true,"sd":true}
+{"tm":"10:23:07","ty":"config","fw":"EDGE-2026-03-16","ho":"3.128.235.120","po":7001,"ss":"AAA","sie":false,"rte":true,"usc":true,"oh":0,"wtp":10,"mc":"345F45243E78","si":"54999439"}
+{"tm":"10:23:07","ty":"short","rg":false,"ug":false,"cd":-56.92,"mi":-65.46,"mx":-56.92,"mc":"345F45243E78","si":"54999439"}

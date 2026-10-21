@@ -2,7 +2,7 @@
 
 #include <AudioKitHAL.h>
 #include <ArduinoJson.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <audio_driver/es8388/es8388.h>
 #include <esp_err.h>
 #include <esp_task_wdt.h>
@@ -15,7 +15,6 @@
 #include <cstring>
 #include <ctime>
 #include <algorithm>
-#include <SD_MMC.h>
 #include "common.h"
 #include "logger.h"
 #include "main.h"
@@ -44,7 +43,7 @@ namespace
 {
     AudioKit kit;
     String currentRecordingPath;
-    File currentRecordingFile;
+    sd_bus::SdFile currentRecordingFile;
     bool isRecording = false;
     bool isSampleRecording = false;
     unsigned long recordingStartMs = 0;
@@ -118,6 +117,8 @@ namespace
     bool codecReady = false;
     uint8_t lastAppliedGainLevel = 255;
 
+#if defined(ECHO)
+    // Speaker / local playback / TX output — ECHO only (Edge/Tango have no speaker and do not transmit).
     bool lastAppliedSpeakerEnabled = false;
     uint8_t lastAppliedSpeakerVolume = 255;
 
@@ -574,7 +575,7 @@ namespace
             }
 
             // 1) As-is
-            if (SD_MMC.exists(original))
+            if (sd_bus::exists(original))
             {
                 outResolved = String(original);
                 return true;
@@ -585,7 +586,7 @@ namespace
             if (candidate.endsWith(".wwav"))
             {
                 candidate = candidate.substring(0, candidate.length() - 5) + ".wav";
-                if (SD_MMC.exists(candidate))
+                if (sd_bus::exists(candidate))
                 {
                     outResolved = candidate;
                     return true;
@@ -598,7 +599,7 @@ namespace
                 String inboxPredicted;
                 if (pendingWavToPredictedInboxPath(candidate, inboxPredicted) && inboxPredicted.length() > 0)
                 {
-                    if (SD_MMC.exists(inboxPredicted))
+                    if (sd_bus::exists(inboxPredicted))
                     {
                         outResolved = inboxPredicted;
                         return true;
@@ -616,7 +617,7 @@ namespace
             return false;
         }
 
-        File f = SD_MMC.open(resolvedPath.c_str(), FILE_READ);
+        sd_bus::SdFile f = sd_bus::open(resolvedPath.c_str(), FILE_READ);
         if (!f)
         {
             logWarnf("[Playback] Failed to open: %s", resolvedPath.c_str());
@@ -775,6 +776,9 @@ namespace
         kit.setVolume(restoreVol);
         kit.setMute(!restoreEnabled);
     }
+    // Startup inhibit window (avoid recording boot beeps/WAVs picked up by the mic).
+    volatile uint32_t g_recordInhibitUntilMs = 0;
+#endif // defined(ECHO)
 
     float dbSmoothingBuffer[kDbSmoothingWindow] = {0.0f};
     size_t dbSmoothingCount = 0;
@@ -795,9 +799,6 @@ namespace
     int16_t* preRecordScratch = nullptr;
     size_t preRecordRingWriteIndex = 0;
     size_t preRecordRingCount = 0;
-
-    // Startup inhibit window (avoid recording boot beeps/WAVs picked up by the mic).
-    volatile uint32_t g_recordInhibitUntilMs = 0;
 
     void appendAudioSamples(const int16_t *samples, size_t byteCount);
     void finalizeRecording(bool upload, const char *endReason);
@@ -1201,7 +1202,7 @@ namespace
                 {
                     if (uploadQueue_lockPendingDir(3000))
                     {
-                        if (SD_MMC.rename(finishedRecordingPath, wavPath))
+                        if (sd_bus::rename(finishedRecordingPath, wavPath))
                         {
                             finishedRecordingPath = wavPath;
                             renameToWavOk = true;
@@ -1233,7 +1234,7 @@ namespace
                     logDebugf("[Record] Discarding small file: %s (duration: %ums < min: %ums)",
                               finishedRecordingPath.c_str(), durationMs,
                               appSettings.audio.discardSmallFilesMinMs);
-                    if (SD_MMC.remove(finishedRecordingPath))
+                    if (sd_bus::remove(finishedRecordingPath))
                     {
                         logDebugf("[Record] Small file deleted successfully: %s",
                                   finishedRecordingPath.c_str());
@@ -1260,12 +1261,10 @@ namespace
             if (upload && !finishedRecordingPath.isEmpty() && !discardedSmallFile && renameToWavOk &&
                 finishedRecordingPath.startsWith("/pending/") && finishedRecordingPath.endsWith(".wav"))
             {
-                // Add to in-memory queue for prioritized upload (never enqueue .tmp — upload cannot consume tmp)
-                time_t recordedEpoch = isEpochValid(recordingStartEpoch) ? recordingStartEpoch : calculateEpochFromMillis(recordingStartMs);
-                unsigned long recordedMs = recordingStartMs;
-                if (!sdCardMemoryQueue_addRecording(finishedRecordingPath.c_str(), recordedEpoch, recordedMs))
+                // Persist basename on that day's SD upload_list (never enqueue .tmp)
+                if (!uploadList_addPending(finishedRecordingPath.c_str()))
                 {
-                    logWarnf("[Record] Failed to add recording to memory queue (queue may be full): %s", finishedRecordingPath.c_str());
+                    logWarnf("[Record] Failed to add recording to day upload_list: %s", finishedRecordingPath.c_str());
                 }
             }
             else if (upload && finishedRecordingPath.endsWith(".tmp"))
@@ -1294,9 +1293,10 @@ namespace
                     recordings_appendSummaryLine(rsl);
                 }
             }
-            // File stays in /pending - upload task will pick it up (from memory queue first, then filesystem scan)
+            // File stays in /pending; basename is on that day's upload_list for the upload task.
         }
 
+#if defined(ECHO)
         // Add to in-memory recent recordings list for SD playback navigation.
         if (finishedRecordingPath.startsWith("/pending/") && finishedRecordingPath.endsWith(".wav"))
         {
@@ -1304,7 +1304,6 @@ namespace
             recentAddRecording(finishedRecordingPath, durationMs, recordedEpoch);
         }
 
-#if defined(ECHO)
         // Repeater modes (ECHO-only)
         // - Simplex: after recording completes, transmit the recorded message.
         // - Duplex: TX is keyed during live audio; ensure we un-key once recording ends.
@@ -1487,9 +1486,9 @@ namespace
             }
             if (!g_sessionPendingRootEnsured)
             {
-                if (!SD_MMC.exists(kPendingDir))
+                if (!sd_bus::exists(kPendingDir))
                 {
-                    if (!SD_MMC.mkdir(kPendingDir))
+                    if (!sd_bus::mkdir(kPendingDir))
                     {
                         logErrorf("[Record] Failed to create /pending directory");
                         uploadQueue_unlockPendingDir();
@@ -1528,7 +1527,7 @@ namespace
                     delay(100 * attempt);
                     storage_recordWriteError();
                 }
-                currentRecordingFile = SD_MMC.open(currentRecordingPath, FILE_WRITE);
+                currentRecordingFile = sd_bus::open(currentRecordingPath, FILE_WRITE);
                 if (currentRecordingFile)
                 {
                     logDebugf("[Record] File opened for recording (path: %s, attempt: %d)", 
@@ -1623,9 +1622,9 @@ namespace
 
     void monitorAndRecordAudio()
     {
-        recorder_applySpeakerSettings();
 
 #if defined(ECHO)
+        recorder_applySpeakerSettings();
         // Cloud recording playback (MQTT play_cloud / play_transmit): download + output, pause upload/record.
         if (g_cloudPlayQueue != nullptr)
         {
@@ -1653,11 +1652,11 @@ namespace
                         esp_task_wdt_reset();
                     }
 
-                    const String path = downloadFile(String(cpr.fileName), getDeviceId());
+                    const String path = resolvePlayFilePath(String(cpr.fileName), getDeviceId());
                     esp_task_wdt_reset();
                     if (path.length() > 0)
                     {
-                        File probe = SD_MMC.open(path.c_str(), FILE_READ);
+                        sd_bus::SdFile probe = sd_bus::open(path.c_str(), FILE_READ);
                         if (probe)
                         {
                             const size_t sz = probe.size();
@@ -1734,7 +1733,6 @@ namespace
                 }
             }
         }
-#endif
 
         // Priority: play one pending beep before processing audio.
         if (g_beepQueue != nullptr)
@@ -1851,6 +1849,8 @@ namespace
             return;
         }
 
+#endif
+
         const size_t bytesRead = kit.read(audioBuffer, sizeof(audioBuffer), pdMS_TO_TICKS(200));
         if (bytesRead == 0)
         {
@@ -1863,17 +1863,14 @@ namespace
             return;
         }
 
+#if defined(ECHO)
         // Local speaker or line-out (radio TX) playback of captured input.
         // Duplex repeater TX routes to line-out only (PA off); normal monitoring uses the speaker.
         if (!g_isBeeping && !g_isPlayingFile)
         {
-#if defined(ECHO)
             const bool duplexTransmitMode = appSettings.repeaterEnabled &&
                                             appSettings.repeaterMode == 2 &&
                                             appSettings.transmitEnabled;
-#else
-            const bool duplexTransmitMode = false;
-#endif
             const bool useSpeaker = appSettings.speakerEnabled && !duplexTransmitMode;
             const bool useLineOutOnly = duplexTransmitMode;
             if (useSpeaker || useLineOutOnly)
@@ -1907,6 +1904,7 @@ namespace
                 }
             }
         }
+#endif
 
         const size_t monoBytes = monoSamples * sizeof(int16_t);
         const float level = calculateAudioLevel(recordingBuffer, monoSamples);
@@ -2186,10 +2184,13 @@ void startAudioCodec()
     }
 
     codecReady = true;
+#if defined(ECHO)
     recorder_applySpeakerSettings();
+#endif
     updateCodecGainFromSettings();
 }
 
+#if defined(ECHO)
 void recorder_applySpeakerSettings()
 {
     if (!codecReady)
@@ -2350,7 +2351,6 @@ bool recorder_playAudioFilePlaceholder(const String& pathOrId)
 
 void recorder_requestPlayCloud(const String& fileName)
 {
-#if defined(ECHO)
     if (fileName.length() == 0)
     {
         return;
@@ -2367,14 +2367,10 @@ void recorder_requestPlayCloud(const String& fileName)
     cpr.transmit = false;
     (void)xQueueOverwrite(g_cloudPlayQueue, &cpr);
     logWarnf("[Playback] Cloud play queued: %s", cpr.fileName);
-#else
-    (void)fileName;
-#endif
 }
 
 void recorder_requestPlayTransmit(const String& fileName)
 {
-#if defined(ECHO)
     if (fileName.length() == 0)
     {
         return;
@@ -2391,10 +2387,8 @@ void recorder_requestPlayTransmit(const String& fileName)
     cpr.transmit = true;
     (void)xQueueOverwrite(g_cloudPlayQueue, &cpr);
     logWarnf("[Playback] Cloud transmit queued: %s", cpr.fileName);
-#else
-    (void)fileName;
-#endif
 }
+#endif
 
 void recordTask(void *pvParameters)
 {

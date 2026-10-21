@@ -14,6 +14,7 @@
 #include "timekeeper.h"
 #include "network.h"
 #include "settings.h"
+#include "sd_bus.h"
 
 extern void recorder_invalidatePendingDirectoryCache();
 
@@ -130,6 +131,7 @@ AppSettings appSettings = []() {
     // Initialize webserver enabled (default: true)
     settings.webserverEnabled = true;
 
+#if defined(ECHO)
     // Speaker defaults
     settings.speakerEnabled = DEFAULT_SPEAKER_ENABLED;
     settings.speakerVolume = DEFAULT_SPEAKER_VOLUME;
@@ -138,11 +140,9 @@ AppSettings appSettings = []() {
     settings.transmitEnabled = DEFAULT_AUDIO_TRANSMIT_ENABLED;
     settings.transmitVolume = DEFAULT_AUDIO_TRANSMIT_VOLUME;
 
-    #if defined(ECHO)
     // Repeater defaults (ECHO-only)
     settings.repeaterEnabled = false;
     settings.repeaterMode = 1; // simplex
-    #endif
 
     // CW (Morse) defaults
     settings.cwWpm = DEFAULT_CW_WPM;
@@ -154,6 +154,7 @@ AppSettings appSettings = []() {
     settings.ledStyle = DEFAULT_LED_STYLE;
     settings.startupMode = DEFAULT_STARTUP_MODE;
     settings.offlineMode = DEFAULT_OFFLINE_MODE;
+#endif
 
     return settings;
 }();
@@ -718,7 +719,7 @@ bool renameRecordingFile(const String &oldPath, time_t correctedEpoch, unsigned 
         return false;
     }
     
-    if (!SD_MMC.exists(oldPath))
+    if (!sd_bus::exists(oldPath))
     {
         return false;
     }
@@ -769,9 +770,9 @@ bool renameRecordingFile(const String &oldPath, time_t correctedEpoch, unsigned 
                 }
                 
                 accum += "/" + part;
-                if (!SD_MMC.exists(accum))
+                if (!sd_bus::exists(accum))
                 {
-                    if (!SD_MMC.mkdir(accum))
+                    if (!sd_bus::mkdir(accum))
                     {
                         return false;
                     }
@@ -780,7 +781,7 @@ bool renameRecordingFile(const String &oldPath, time_t correctedEpoch, unsigned 
             return true;
         };
         
-        if (!SD_MMC.exists(baseDir))
+        if (!sd_bus::exists(baseDir))
         {
             if (!ensureDirectoryRecursive(baseDir.c_str()))
             {
@@ -803,7 +804,7 @@ bool renameRecordingFile(const String &oldPath, time_t correctedEpoch, unsigned 
     // Handle name collision (unlikely but possible)
     int counter = 1;
     String finalNewPath = newPath;
-    while (SD_MMC.exists(finalNewPath))
+    while (sd_bus::exists(finalNewPath))
     {
         char counterPart[16];
         std::snprintf(counterPart, sizeof(counterPart), "-%d", counter);
@@ -825,16 +826,16 @@ bool renameRecordingFile(const String &oldPath, time_t correctedEpoch, unsigned 
     
     // Rename the file
     logDebugf("[Storage] Renaming recording file: %s -> %s", oldPath.c_str(), finalNewPath.c_str());
-    if (SD_MMC.rename(oldPath, finalNewPath))
+    if (sd_bus::rename(oldPath, finalNewPath))
     {
         logDebugf("[Storage] File renamed successfully: %s", finalNewPath.c_str());
         // Also rename .uploaded marker if it exists
         String oldMarker = oldPath + ".uploaded";
-        if (SD_MMC.exists(oldMarker))
+        if (sd_bus::exists(oldMarker))
         {
             String newMarker = finalNewPath + ".uploaded";
             logDebugf("[Storage] Renaming .uploaded marker: %s -> %s", oldMarker.c_str(), newMarker.c_str());
-            if (SD_MMC.rename(oldMarker, newMarker))
+            if (sd_bus::rename(oldMarker, newMarker))
             {
                 logDebugf("[Storage] Marker renamed successfully: %s", newMarker.c_str());
             }
@@ -879,17 +880,12 @@ namespace
 
     bool beginSdCardMount()
     {
-#if defined(SD_MMC_MODE_LEGACY)
-        // Legacy SD mode uses SPI-compatible initialization and ignores SDMMC tuning settings.
-        return SD_MMC.begin("/sdcard", true, false);
-#else
-        return SD_MMC.begin(
+        return sd_bus::mount(
             "/sdcard",
             appSettings.sdCard.mode1bit,
             appSettings.sdCard.formatIfMountFailed,
             appSettings.sdCard.frequency,
             SD_MMC_MAX_OPEN_FILES);
-#endif
     }
 
     bool initializeSdCardWithRetries(int maxRetries)
@@ -899,7 +895,7 @@ namespace
             if (attempt > 0)
             {
                 delay(200); // Wait before retry
-                SD_MMC.end(); // End previous failed attempt
+                sd_bus::unmount(); // End previous failed attempt
             }
 
             delay(100);
@@ -960,12 +956,12 @@ void storage_revaluateMode()
     }
     
     // If SD card is currently mounted but useSdCard is now disabled, unmount it
-    if (g_storageMode == StorageMode::SD_CARD && SD_MMC.cardType() != CARD_NONE)
+    if (g_storageMode == StorageMode::SD_CARD && sd_bus::cardType() != CARD_NONE)
     {
         if (!appSettings.sdCard.useSdCard)
         {
             logInfof("[Storage] SD card disabled in settings - unmounting");
-            SD_MMC.end();
+            sd_bus::unmount();
         }
     }
     
@@ -1048,7 +1044,7 @@ bool ensureStorage()
     {
         // Check if SD_MMC is already initialized/connected
         // If card type is not CARD_NONE, SD is already connected
-        if (SD_MMC.cardType() != CARD_NONE)
+        if (sd_bus::cardType() != CARD_NONE)
         {
             // SD is already connected, don't end it, just mark as initialized
             g_storageMode = StorageMode::SD_CARD;
@@ -1078,8 +1074,8 @@ bool ensureStorage()
             g_lastSdCardRetryAttemptMs = 0;
             
             // Update storage health metrics
-            g_storageHealthMetrics.totalBytes = SD_MMC.totalBytes();
-            g_storageHealthMetrics.usedBytes = SD_MMC.usedBytes();
+            g_storageHealthMetrics.totalBytes = sd_bus::totalBytes();
+            g_storageHealthMetrics.usedBytes = sd_bus::usedBytes();
             g_storageHealthMetrics.freeBytes = g_storageHealthMetrics.totalBytes - g_storageHealthMetrics.usedBytes;
             if (g_storageHealthMetrics.totalBytes > 0)
             {
@@ -1176,15 +1172,15 @@ void storage_updateHealthMetrics()
     }
     
     // SD card mode
-    if (SD_MMC.cardType() == CARD_NONE)
+    if (sd_bus::cardType() == CARD_NONE)
     {
         g_storageHealthMetrics.mountStable = false;
         return;
     }
     
     g_storageHealthMetrics.mountStable = true;
-    g_storageHealthMetrics.totalBytes = SD_MMC.totalBytes();
-    g_storageHealthMetrics.usedBytes = SD_MMC.usedBytes();
+    g_storageHealthMetrics.totalBytes = sd_bus::totalBytes();
+    g_storageHealthMetrics.usedBytes = sd_bus::usedBytes();
     g_storageHealthMetrics.freeBytes = g_storageHealthMetrics.totalBytes - g_storageHealthMetrics.usedBytes;
     
     if (g_storageHealthMetrics.totalBytes > 0)
@@ -1276,7 +1272,7 @@ void storage_handleRuntimeSdCardFailure()
     logInfof("[Storage] Attempting to remount SD card after runtime failure...");
     
     // Try to remount SD card
-    SD_MMC.end(); // End current connection
+    sd_bus::unmount(); // End current connection
     delay(500); // Wait a bit
     
     if (initializeSdCardWithRetries(1))
@@ -1291,8 +1287,8 @@ void storage_handleRuntimeSdCardFailure()
         g_lastSdCardRetryAttemptMs = 0;
         
         // Update storage health metrics
-        g_storageHealthMetrics.totalBytes = SD_MMC.totalBytes();
-        g_storageHealthMetrics.usedBytes = SD_MMC.usedBytes();
+        g_storageHealthMetrics.totalBytes = sd_bus::totalBytes();
+        g_storageHealthMetrics.usedBytes = sd_bus::usedBytes();
         g_storageHealthMetrics.freeBytes = g_storageHealthMetrics.totalBytes - g_storageHealthMetrics.usedBytes;
         if (g_storageHealthMetrics.totalBytes > 0)
         {
@@ -1334,7 +1330,7 @@ uint32_t storage_cleanupOldUploadedFiles(uint32_t maxAgeDays)
     std::function<uint32_t(const String &)> cleanupDir = [&](const String &dirPath) -> uint32_t
     {
         uint32_t count = 0;
-        File dir = SD_MMC.open(dirPath);
+        sd_bus::SdFile dir = sd_bus::open(dirPath);
         if (!dir)
         {
             return 0;
@@ -1342,7 +1338,7 @@ uint32_t storage_cleanupOldUploadedFiles(uint32_t maxAgeDays)
         
         while (true)
         {
-            File entry = dir.openNextFile();
+            sd_bus::SdFile entry = dir.openNextFile();
             if (!entry)
             {
                 break;
@@ -1386,7 +1382,7 @@ uint32_t storage_cleanupOldUploadedFiles(uint32_t maxAgeDays)
                             
                             if (isEpochValid(fileEpoch) && (now - fileEpoch) > maxAgeSeconds)
                             {
-                                if (SD_MMC.remove(fname))
+                                if (sd_bus::remove(fname))
                                 {
                                     count++;
                                 }
@@ -1416,7 +1412,7 @@ uint32_t storage_cleanupOldUploadedFiles(uint32_t maxAgeDays)
                             
                             if (isEpochValid(fileEpoch) && (now - fileEpoch) > maxAgeSeconds)
                             {
-                                if (SD_MMC.remove(fname))
+                                if (sd_bus::remove(fname))
                                 {
                                     count++;
                                 }
@@ -1434,13 +1430,13 @@ uint32_t storage_cleanupOldUploadedFiles(uint32_t maxAgeDays)
     };
     
     // Cleanup /inbox directory
-    if (SD_MMC.exists("/inbox"))
+    if (sd_bus::exists("/inbox"))
     {
         deletedCount += cleanupDir("/inbox");
     }
     
     // Cleanup /queue directory
-    if (SD_MMC.exists("/queue"))
+    if (sd_bus::exists("/queue"))
     {
         deletedCount += cleanupDir("/queue");
     }
@@ -1454,7 +1450,7 @@ namespace
     uint32_t cleanupCorruptedInDirHelper(const String &dirPath)
     {
         uint32_t count = 0;
-        File dir = SD_MMC.open(dirPath);
+        sd_bus::SdFile dir = sd_bus::open(dirPath);
         if (!dir || !dir.isDirectory())
         {
             return 0;
@@ -1462,7 +1458,7 @@ namespace
         
         while (true)
         {
-            File entry = dir.openNextFile();
+            sd_bus::SdFile entry = dir.openNextFile();
             if (!entry)
             {
                 break;
@@ -1502,27 +1498,27 @@ namespace
                     // Files smaller than 100 bytes are likely corrupted or incomplete
                     if (fileSize > 0 && fileSize < 100)
                     {
-                        if (SD_MMC.remove(fname))
+                        if (sd_bus::remove(fname))
                         {
                             count++;
                             // Also remove marker file if it exists
                             String marker = fname + ".uploaded";
-                            if (SD_MMC.exists(marker))
+                            if (sd_bus::exists(marker))
                             {
-                                SD_MMC.remove(marker);
+                                sd_bus::remove(marker);
                             }
                         }
                     }
                     else if (fileSize == 0)
                     {
                         // Zero-byte files are definitely corrupted
-                        if (SD_MMC.remove(fname))
+                        if (sd_bus::remove(fname))
                         {
                             count++;
                             String marker = fname + ".uploaded";
-                            if (SD_MMC.exists(marker))
+                            if (sd_bus::exists(marker))
                             {
-                                SD_MMC.remove(marker);
+                                sd_bus::remove(marker);
                             }
                         }
                     }
@@ -1548,13 +1544,13 @@ uint32_t storage_cleanupCorruptedFiles()
     uint32_t deletedCount = 0;
     
     // Cleanup /inbox directory
-    if (SD_MMC.exists("/inbox"))
+    if (sd_bus::exists("/inbox"))
     {
         deletedCount += cleanupCorruptedInDirHelper("/inbox");
     }
     
     // Cleanup /queue directory
-    if (SD_MMC.exists("/queue"))
+    if (sd_bus::exists("/queue"))
     {
         deletedCount += cleanupCorruptedInDirHelper("/queue");
     }
@@ -1774,8 +1770,8 @@ void serialWriteJsonAtomic(const String &jsonMessage)
     
     if (serialMutex != nullptr)
     {
-        // Wait up to 5 seconds to acquire mutex
-        mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(5000)) == pdTRUE);
+        // Short wait: do not stall record/upload if CLI or status holds the mutex
+        mutexAcquired = (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(50)) == pdTRUE);
     }
     
     // Only send if we acquired mutex or mutex is not available (fallback)
@@ -1788,14 +1784,9 @@ void serialWriteJsonAtomic(const String &jsonMessage)
             messageToSend += "\n";
         }
         
-        // Send entire message atomically using write() instead of print()
-        // This ensures the message is sent as a single unit
-        // Note: If Serial buffer is full, write() will block or drop bytes
-        // The ESP32 Serial library handles buffer overflow internally
+        // Queue the line; do not Serial.flush() here — uart_wait_tx_done blocks
+        // the caller until 115200 baud has drained (~87 µs/byte).
         Serial.write(reinterpret_cast<const uint8_t*>(messageToSend.c_str()), messageToSend.length());
-        
-        // Flush to ensure message is fully transmitted
-        Serial.flush();
     }
     
     // Release mutex if we acquired it
@@ -1838,7 +1829,7 @@ bool storage_deleteOldestFolderIfNeeded()
     // Walk /inbox directory to find oldest YYYY/MM/DD folder
     std::function<void(const String &)> findOldest = [&](const String &dirPath)
     {
-        File dir = SD_MMC.open(dirPath);
+        sd_bus::SdFile dir = sd_bus::open(dirPath);
         if (!dir)
         {
             return;
@@ -1846,7 +1837,7 @@ bool storage_deleteOldestFolderIfNeeded()
         
         while (true)
         {
-            File entry = dir.openNextFile();
+            sd_bus::SdFile entry = dir.openNextFile();
             if (!entry)
             {
                 break;
@@ -1896,7 +1887,7 @@ bool storage_deleteOldestFolderIfNeeded()
         dir.close();
     };
     
-    if (SD_MMC.exists("/inbox"))
+    if (sd_bus::exists("/inbox"))
     {
         findOldest("/inbox");
     }
@@ -1910,7 +1901,7 @@ bool storage_deleteOldestFolderIfNeeded()
     // Recursively delete folder contents
     std::function<bool(const String &)> deleteFolderRecursive = [&](const String &folderPath) -> bool
     {
-        File dir = SD_MMC.open(folderPath);
+        sd_bus::SdFile dir = sd_bus::open(folderPath);
         if (!dir)
         {
             return false;
@@ -1919,7 +1910,7 @@ bool storage_deleteOldestFolderIfNeeded()
         bool success = true;
         while (true)
         {
-            File entry = dir.openNextFile();
+            sd_bus::SdFile entry = dir.openNextFile();
             if (!entry)
             {
                 break;
@@ -1937,14 +1928,14 @@ bool storage_deleteOldestFolderIfNeeded()
                 {
                     success = false;
                 }
-                if (!SD_MMC.rmdir(entryPath))
+                if (!sd_bus::rmdir(entryPath))
                 {
                     success = false;
                 }
             }
             else
             {
-                if (!SD_MMC.remove(entryPath))
+                if (!sd_bus::remove(entryPath))
                 {
                     success = false;
                 }
@@ -1961,7 +1952,7 @@ bool storage_deleteOldestFolderIfNeeded()
     if (deleted)
     {
         // Try to remove the folder itself (may fail if not empty, but that's okay)
-        SD_MMC.rmdir(oldestFolderPath);
+        sd_bus::rmdir(oldestFolderPath);
         
         // Update storage metrics after deletion
         storage_updateHealthMetrics();
@@ -1996,7 +1987,7 @@ bool storage_hasDayIndexFile(int year, int month, int day)
     std::snprintf(indexPath, sizeof(indexPath), "/inbox/%04d/%02d/%02d/%04d-%02d-%02d-Index.txt",
                   year, month, day, year, month, day);
     
-    return SD_MMC.exists(indexPath);
+    return sd_bus::exists(indexPath);
 }
 
 // Create an index file for a completed day folder
@@ -2012,7 +2003,7 @@ bool storage_createDayIndexFile(int year, int month, int day)
     char folderPath[32];
     std::snprintf(folderPath, sizeof(folderPath), "/inbox/%04d/%02d/%02d", year, month, day);
     
-    if (!SD_MMC.exists(folderPath))
+    if (!sd_bus::exists(folderPath))
     {
         return false; // Folder doesn't exist
     }
@@ -2024,7 +2015,7 @@ bool storage_createDayIndexFile(int year, int month, int day)
     }
     
     // Scan folder for .wav files and check if all have .uploaded markers
-    File dir = SD_MMC.open(folderPath);
+    sd_bus::SdFile dir = sd_bus::open(folderPath);
     if (!dir)
     {
         return false;
@@ -2052,7 +2043,7 @@ bool storage_createDayIndexFile(int year, int month, int day)
     
     while (fileCount < kMaxFilesPerDay)
     {
-        File entry = dir.openNextFile();
+        sd_bus::SdFile entry = dir.openNextFile();
         if (!entry)
         {
             break;
@@ -2072,7 +2063,7 @@ bool storage_createDayIndexFile(int year, int month, int day)
                 // Check for .uploaded marker
                 String fullPath = String(folderPath) + "/" + fname;
                 String markerPath = fullPath + ".uploaded";
-                files[fileCount].hasUploadedMarker = SD_MMC.exists(markerPath);
+                files[fileCount].hasUploadedMarker = sd_bus::exists(markerPath);
                 
                 if (files[fileCount].hasUploadedMarker)
                 {
@@ -2105,7 +2096,7 @@ bool storage_createDayIndexFile(int year, int month, int day)
     std::snprintf(indexPath, sizeof(indexPath), "/inbox/%04d/%02d/%02d/%04d-%02d-%02d-Index.txt",
                   year, month, day, year, month, day);
     
-    File indexFile = SD_MMC.open(indexPath, FILE_WRITE);
+    sd_bus::SdFile indexFile = sd_bus::open(indexPath, FILE_WRITE);
     if (!indexFile)
     {
         delete[] files;
@@ -2152,7 +2143,7 @@ bool storage_updateMonthlySummary(int year, int month)
     char monthDirPath[32];
     std::snprintf(monthDirPath, sizeof(monthDirPath), "/inbox/%04d/%02d", year, month);
     
-    if (!SD_MMC.exists(monthDirPath))
+    if (!sd_bus::exists(monthDirPath))
     {
         return false; // Month folder doesn't exist
     }
@@ -2178,7 +2169,7 @@ bool storage_updateMonthlySummary(int year, int month)
         char dayDirPath[40];
         std::snprintf(dayDirPath, sizeof(dayDirPath), "/inbox/%04d/%02d/%02d", year, month, day);
         
-        if (!SD_MMC.exists(dayDirPath))
+        if (!sd_bus::exists(dayDirPath))
         {
             continue;
         }
@@ -2187,13 +2178,13 @@ bool storage_updateMonthlySummary(int year, int month)
         char indexPath[64];
         std::snprintf(indexPath, sizeof(indexPath), "%s/index.json", dayDirPath);
         
-        if (!SD_MMC.exists(indexPath))
+        if (!sd_bus::exists(indexPath))
         {
             continue; // No index file for this day
         }
         
         // Read and parse index.json (JSONL format - one JSON per line)
-        File indexFile = SD_MMC.open(indexPath, FILE_READ);
+        sd_bus::SdFile indexFile = sd_bus::open(indexPath, FILE_READ);
         if (!indexFile)
         {
             continue;
@@ -2293,7 +2284,7 @@ bool storage_updateMonthlySummary(int year, int month)
     char summaryPath[48];
     std::snprintf(summaryPath, sizeof(summaryPath), "/inbox/%04d/%02d/summary.json", year, month);
     
-    File summaryFile = SD_MMC.open(summaryPath, FILE_WRITE);
+    sd_bus::SdFile summaryFile = sd_bus::open(summaryPath, FILE_WRITE);
     if (!summaryFile)
     {
         logErrorf("[Storage] Failed to create monthly summary: %s\n", summaryPath);
@@ -2320,7 +2311,7 @@ bool storage_updateYearlySummary(int year)
     char yearDirPath[24];
     std::snprintf(yearDirPath, sizeof(yearDirPath), "/inbox/%04d", year);
     
-    if (!SD_MMC.exists(yearDirPath))
+    if (!sd_bus::exists(yearDirPath))
     {
         return false; // Year folder doesn't exist
     }
@@ -2354,13 +2345,13 @@ bool storage_updateYearlySummary(int year)
         char monthSummaryPath[48];
         std::snprintf(monthSummaryPath, sizeof(monthSummaryPath), "/inbox/%04d/%02d/summary.json", year, month);
         
-        if (!SD_MMC.exists(monthSummaryPath))
+        if (!sd_bus::exists(monthSummaryPath))
         {
             continue; // No summary for this month
         }
         
         // Read and parse monthly summary.json
-        File summaryFile = SD_MMC.open(monthSummaryPath, FILE_READ);
+        sd_bus::SdFile summaryFile = sd_bus::open(monthSummaryPath, FILE_READ);
         if (!summaryFile)
         {
             continue;
@@ -2444,7 +2435,7 @@ bool storage_updateYearlySummary(int year)
     char summaryPath[32];
     std::snprintf(summaryPath, sizeof(summaryPath), "/inbox/%04d/summary.json", year);
     
-    File summaryFile = SD_MMC.open(summaryPath, FILE_WRITE);
+    sd_bus::SdFile summaryFile = sd_bus::open(summaryPath, FILE_WRITE);
     if (!summaryFile)
     {
         logErrorf("[Storage] Failed to create yearly summary: %s\n", summaryPath);
@@ -2638,9 +2629,9 @@ bool storage_ensureDirectoryPath(const char *dirPath)
             }
             currentPath += segment;
 
-            if (!SD_MMC.exists(currentPath.c_str()))
+            if (!sd_bus::exists(currentPath.c_str()))
             {
-                if (!SD_MMC.mkdir(currentPath.c_str()))
+                if (!sd_bus::mkdir(currentPath.c_str()))
                 {
                     logErrorf("[Storage] Failed to create directory: %s\n", currentPath.c_str());
                     return false;
@@ -2730,7 +2721,7 @@ bool recordings_appendSummaryLine(const RecordingsSummaryLine &line)
     doc["sampleRate"] = line.sampleRate;
     doc["deviceId"] = getDeviceId();
 
-    File f = SD_MMC.open(summaryPath, FILE_APPEND);
+    sd_bus::SdFile f = sd_bus::open(summaryPath, FILE_APPEND);
     if (!f)
     {
         logErrorf("[Recordings] Failed to open summary for append: %s\n", summaryPath);
@@ -2750,21 +2741,21 @@ void recordings_deleteSummaryForDay(int year, int month, int day)
     }
     char summaryPath[72];
     std::snprintf(summaryPath, sizeof(summaryPath), "/recordings/%04d/%02d/%02d/summary.json", year, month, day);
-    if (SD_MMC.exists(summaryPath))
+    if (sd_bus::exists(summaryPath))
     {
-        SD_MMC.remove(summaryPath);
+        sd_bus::remove(summaryPath);
     }
     char dayDir[48];
     std::snprintf(dayDir, sizeof(dayDir), "/recordings/%04d/%02d/%02d", year, month, day);
-    if (SD_MMC.exists(dayDir))
+    if (sd_bus::exists(dayDir))
     {
-        File dir = SD_MMC.open(dayDir);
+        sd_bus::SdFile dir = sd_bus::open(dayDir);
         if (dir && dir.isDirectory())
         {
             bool empty = true;
             while (true)
             {
-                File e = dir.openNextFile();
+                sd_bus::SdFile e = dir.openNextFile();
                 if (!e)
                 {
                     break;
@@ -2775,7 +2766,7 @@ void recordings_deleteSummaryForDay(int year, int month, int day)
             dir.close();
             if (empty)
             {
-                SD_MMC.rmdir(dayDir);
+                sd_bus::rmdir(dayDir);
             }
         }
         else if (dir)
@@ -2787,7 +2778,7 @@ void recordings_deleteSummaryForDay(int year, int month, int day)
 
 static void pruneRecordingsRecursive(const String &dirPath)
 {
-    File dir = SD_MMC.open(dirPath);
+    sd_bus::SdFile dir = sd_bus::open(dirPath);
     if (!dir || !dir.isDirectory())
     {
         if (dir)
@@ -2809,14 +2800,14 @@ static void pruneRecordingsRecursive(const String &dirPath)
         std::snprintf(inboxDay, sizeof(inboxDay), "/inbox/%04d/%02d/%02d", dayY, dayM, dayD);
         char summaryPath[80];
         std::snprintf(summaryPath, sizeof(summaryPath), "%s/summary.json", dirPath.c_str());
-        if (SD_MMC.exists(summaryPath) && !SD_MMC.exists(inboxDay))
+        if (sd_bus::exists(summaryPath) && !sd_bus::exists(inboxDay))
         {
-            SD_MMC.remove(summaryPath);
+            sd_bus::remove(summaryPath);
         }
     }
     while (true)
     {
-        File entry = dir.openNextFile();
+        sd_bus::SdFile entry = dir.openNextFile();
         if (!entry)
         {
             break;
@@ -2842,7 +2833,7 @@ void storage_pruneRecordingsSummariesWithoutInbox()
     {
         return;
     }
-    if (!SD_MMC.exists("/recordings"))
+    if (!sd_bus::exists("/recordings"))
     {
         return;
     }

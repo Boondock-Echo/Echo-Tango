@@ -75,6 +75,7 @@ bool recorder_isRecordingPausedForLiveSession();
 void recorder_setLineInRecordingEnabled(bool enabled);
 bool recorder_isLineInRecordingEnabled();
 
+#if defined(ECHO)
 // Apply speaker settings (mute/volume) to the codec.
 // Safe to call repeatedly; no-op if codec not ready.
 void recorder_applySpeakerSettings();
@@ -82,17 +83,6 @@ void recorder_applySpeakerSettings();
 // Button feedback beeps (legacy-style).
 // Schedules the beep to be played on the AudioKit output.
 void recorder_beep(int beepLengthMs, int beepDelayMs, int beepCount, bool beepGood);
-
-// Placeholder playback APIs (to be implemented later).
-bool recorder_playAudioFilePlaceholder(const String& pathOrId);
-
-// Download cloud recording and play on speaker (ECHO / MQTT play_cloud).
-// Runs on RecordTask: pauses uploads/recording for the session and feeds the watchdog.
-void recorder_requestPlayCloud(const String& fileName);
-
-// Same as play_cloud but keys PTT (GPIO 18) during playback when audio.transmitEnabled is set.
-// Audio goes to line-out (radio) only; the onboard speaker stays muted during transmit.
-void recorder_requestPlayTransmit(const String& fileName);
 
 // SD playback controls (ECHO-style message navigation).
 // These enqueue requests handled by the recorder task (AudioKit context).
@@ -111,3 +101,15 @@ void recorder_inhibitRecordingForMs(uint32_t durationMs);
 // Enqueues a best-effort playback request handled by the recorder task.
 void recorder_requestPlayMorse(const String& text, uint16_t wpm, uint16_t toneHz, uint8_t volume, uint8_t repeat);
 void recorder_cancelMorse();
+
+// Placeholder playback APIs (to be implemented later).
+bool recorder_playAudioFilePlaceholder(const String& pathOrId);
+
+// Download cloud recording and play on speaker (ECHO / MQTT play_cloud).
+// Runs on RecordTask: pauses uploads/recording for the session and feeds the watchdog.
+void recorder_requestPlayCloud(const String& fileName);
+
+// Same as play_cloud but keys PTT (GPIO 18) during playback when audio.transmitEnabled is set.
+// Audio goes to line-out (radio) only; the onboard speaker stays muted during transmit.
+void recorder_requestPlayTransmit(const String& fileName);
+#endif

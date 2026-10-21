@@ -15,7 +15,10 @@ void mqtt_clearCommandInProgress();
 
 bool mqtt_isCommandInProgress();
 
-// Returns local SD path on success, empty string on failure. Runs on RecordTask.
+// play_cloud / play_transmit: inbox -> outbox -> cloud download. Runs on RecordTask.
+String resolvePlayFilePath(const String& fileName, const String& macAddress);
+
+// Returns local outbox SD path on success, empty string on failure. Runs on RecordTask.
 String downloadFile(const String& fileName, const String& macAddress);
 
 #endif

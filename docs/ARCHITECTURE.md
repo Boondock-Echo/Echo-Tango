@@ -57,10 +57,12 @@ Handles voice-activated recording logic.
 - **PSRAM** – Fallback when SD is unavailable; recordings held in memory
 
 **Upload queue:**
-- **Filesystem-based** – `/pending/` is the queue; files move to `/inbox/` after successful upload
-- **In-memory queues** – `sdCardMemoryQueue` for recent recordings (priority), `psramQueue` for PSRAM mode
+- **SD card mode** – each day folder has append-only `upload_list` and `upload_list.idx`; files stay under `/pending/YYYY/MM/DD/` until upload, then move to `/inbox`. See [PENDING_UPLOAD_LIST.md](./PENDING_UPLOAD_LIST.md).
+- **PSRAM mode** – `psramQueue` holds completed WAV buffers in memory (unchanged)
 
 **Storage helpers:** `ensureStorage()`, `getStorageMode()`, `isStorageModeSdCard()`, `isStorageModePsram()`, `storage_updateHealthMetrics()`, cleanup and summary helpers.
+
+**SD bus lock:** All `src/` card I/O goes through `sd_bus` (`sd_bus.h` / `sd_bus.cpp`) so RecordTask, NetworkTask, logger, maintenance, MQTT, CLI, and WebServer never issue overlapping `SD_MMC` calls. See [SD_BUS_LOCK.md](./SD_BUS_LOCK.md).
 
 ---
 
@@ -97,7 +99,8 @@ HTTP + WebSocket server for management and live streaming.
 - **AP mode** – Captive portal when no WiFi credentials are configured
 - **Main mode** – Web UI for configuration and monitoring when WiFi is configured
 - **WebSocket** – Push of home data, audio stats, network config, live audio
-- **SPA assets** – Embedded HTML/CSS/JS via `web_*.h` and `app_js_*.h`
+- **SPA assets** – Embedded HTML/CSS/JS via `web_*.h` and `app_js_*.h`; if present on the card, served through `sd_bus` (not raw `SD_MMC`)
+- **Recordings / browser playback** – Folder list, day summary, and WAV stream (`/api/recordings/stream`) all use `sd_bus`. Playing a file in the web UI reads the card even when **recording** mode is PSRAM. Live Audio is a separate RAM path and does not use this handler.
 
 **Notable APIs:** `boondock_server_startAPMode()`, `boondock_server_loop()`, `boondock_server_pushLiveAudio()`.
 
@@ -235,7 +238,7 @@ Microphone → Codec (ES8388) → Recorder
 | `main.cpp`        | Startup, loop, task creation      |
 | `main.h`          | AppSettings, health metrics       |
 | `recorder.cpp/h`  | Recorder                          |
-| `upload_queue.cpp/h` | Upload queue                   |
+| `upload_queue.cpp/h` | Upload queue (per-day `upload_list` on SD) |
 | `network.cpp/h`   | Network                           |
 | `settings.cpp/h`  | Settings                          |
 | `common.cpp/h`    | Shared utilities                  |

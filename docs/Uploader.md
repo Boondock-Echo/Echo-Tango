@@ -5,9 +5,7 @@
 The UploadTask runs on **Core 0** (priority 1) and is responsible for taking completed recordings and uploading them to the cloud API via HTTP POST. It supports two storage modes with a prioritized queue system:
 
 - **PSRAM mode** — polls the in-memory PSRAM queue, uploads, and frees the buffer
-- **SD card mode** — two-tier priority system:
-  - **Priority 1:** In-memory queue of recent recordings (fastest, up to 20 entries)
-  - **Priority 2:** Filesystem scan of `/pending/*.wav` (catches anything missed)
+- **SD card mode** — pending names live on the card in each day's append-only `upload_list`, with progress in `upload_list.idx` (see [PENDING_UPLOAD_LIST.md](./PENDING_UPLOAD_LIST.md)); the upload task reads one name at a time. There is no in-RAM backlog of filenames.
 
 After successful upload, SD card files are moved from `/pending` to `/inbox` and an entry is appended to the daily `index.json`.
 
@@ -61,31 +59,23 @@ flowchart TD
 
     U1 -- Yes --> SD0{Startup Delay<br/>Active?}
 
-    SD0 -- Yes --> SD1[Check In-Memory Queue Only<br/>Recent recordings have priority]
-    SD1 --> SD1a{Entry in<br/>memory queue?}
-    SD1a -- Yes --> SD_UPLOAD
-    SD1a -- No --> SD1b[Wait for startup<br/>delay to complete]
+    SD0 -- Yes --> SD1b[Wait for startup<br/>delay to complete]
     SD1b --> SD0
 
-    SD0 -- No --> SD2[Check In-Memory Queue<br/>Priority 1 — Recent recordings]
-    SD2 --> SD3{Memory Queue<br/>Entry?}
-    SD3 -- Yes --> SD_UPLOAD[Open file<br/>Build upload request]
-
-    SD3 -- No --> SD4[Scan /pending/*.wav<br/>Priority 2 — Filesystem scan<br/>Newest files first]
-    SD4 --> SD5{File Found?}
+    SD0 -- No --> SD4[Read today upload_list by UTC path<br/>fallback: tree walk for older days]
+    SD4 --> SD5{Name Found?}
     SD5 -- No --> SD6[Sleep & Poll]
     SD6 --> SD0
     SD5 -- Yes --> SD7[Open file<br/>Build upload request]
 
-    SD_UPLOAD --> SD8[uploadAudioFile<br/>HTTP POST to API endpoint]
-    SD7 --> SD8
+    SD7 --> SD8[uploadAudioFile<br/>HTTP POST to API endpoint]
 
     SD8 --> SD9{Upload OK?}
 
     SD9 -- Yes --> SD10[uploadQueue_markUploaded<br/>Move file /pending → /inbox]
     SD10 --> SD11[uploadQueue_appendToIndex<br/>Add record to daily index.json]
     SD11 --> SD12[recorder_incrementUploadedCount]
-    SD12 --> SD13[Wait 5s before next file]
+    SD12 --> SD13[500ms cooldown; defer events]
     SD13 --> SD0
 
     SD9 -- No --> SD14[File stays in /pending<br/>Available for retry]
@@ -95,9 +85,7 @@ flowchart TD
 
     style U0 fill:#16213e,stroke:#82ccdd,color:#fff
     style U1 fill:#1a1a2e,stroke:#e94560,color:#fff
-    style SD2 fill:#0f3460,stroke:#53a8b6,color:#fff
     style SD4 fill:#0f3460,stroke:#53a8b6,color:#fff
-    style SD_UPLOAD fill:#0a3d62,stroke:#38ada9,color:#fff
     style SD7 fill:#0a3d62,stroke:#38ada9,color:#fff
     style SD8 fill:#0a3d62,stroke:#38ada9,color:#fff
     style SD10 fill:#78e08f,stroke:#38ada9,color:#1a1a2e
@@ -115,15 +103,14 @@ flowchart TD
 | Queue | Storage | Capacity | Source | Priority |
 |-------|---------|----------|--------|----------|
 | PSRAM Queue | PSRAM heap | 6 entries × ~480 KB each | `finalizeRecording()` in PSRAM mode | Only queue in PSRAM mode |
-| SD Memory Queue | Internal RAM | 20 entries (file paths) | `finalizeRecording()` in SD mode | 1 — Highest (recent recordings) |
-| Filesystem Scan | SD card `/pending/` | Unlimited (disk space) | Files left from previous sessions or missed by memory queue | 2 — Fallback |
+| Per-day `upload_list` | SD `/pending/YYYY/MM/DD/upload_list` | Unlimited (disk space) | `uploadList_addPending()` after finalize | Only SD pending-name source |
 
 ## File Lifecycle (SD Card Mode)
 
 ```mermaid
 flowchart LR
     A[Recording starts<br/>/pending/YYYY-MM-DD-HH-MM-SS.tmp] --> B[Recording ends<br/>Rename .tmp → .wav]
-    B --> C[Added to in-memory<br/>SD card queue]
+    B --> C[Basename appended to<br/>that day's upload_list]
     C --> D[UploadTask picks up file]
     D --> E{Upload OK?}
     E -- Yes --> F[Move to /inbox/YYYY/MM/DD/<br/>Append to index.json]
@@ -136,6 +123,22 @@ flowchart LR
     style F fill:#78e08f,stroke:#38ada9,color:#1a1a2e
     style G fill:#b71540,stroke:#e94560,color:#fff
 ```
+
+---
+
+## Network-friendly upload behavior
+
+Under continuous recording the ESP32 WiFi stack can run out of TCP send buffers (`tcp_write 0/4096`, then `errno 119`). Mitigations:
+
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| `UPLOAD_TCP_CHUNK_SIZE` | 1024 bytes | Smaller `WiFiClient::write()` calls; less pressure per syscall |
+| Chunk yield | every 2 chunks | Brief `vTaskDelay(1)` so LwIP/WiFi can drain |
+| `UPLOAD_INTER_FILE_COOLDOWN_MS` | 500 ms | Pause after each successful upload before the next file |
+| Event drain | idle only | While `handleUploadOne()` uploaded a file, **no** event TCP — avoids competing sockets during backlog drain |
+| Cloud-path WiFi reconnect | blocked while uploading | `network_reconnectWiFi()` and `cloudPathMaybeRecover()` skip if `networkHandler_isUploading()` — prevents reason-8 disconnect mid-POST (see log `06:44:14`) |
+
+Cloud-path recovery still runs from `network_loop()` when uploads are idle; deferred reconnects wait until the current POST finishes.
 
 ---
 

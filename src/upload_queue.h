@@ -4,8 +4,9 @@
 #include <time.h>
 
 // Filesystem-based upload queue
-// Files are stored in /pending/YYYY/MM/DD/ (same layout as inbox) and moved/deleted after successful upload
-// This eliminates complex queue management - the filesystem IS the queue
+// WAV files live in /pending/YYYY/MM/DD/. Pending names are append-only in upload_list;
+// upload_list.idx holds the next line to upload. After success the file moves to /inbox
+// and the index advances (the list file is not rewritten).
 
 // Directory paths
 constexpr const char* kPendingDir = "/pending";
@@ -30,17 +31,10 @@ constexpr size_t kPsramQueueMaxEntries = 6;
 constexpr size_t kPsramPoolSize = 7;
 constexpr size_t kPsramPoolBufferSize = 480044U;
 
-// SPIRAM-backed queue entry: basename only (e.g. YYYY-MM-DD-HH-MM-SS.wav); full path via sdCardMemoryQueue_buildFullPath
-struct SdCardMemoryQueueEntry {
-    char basename[64] = {0};
-    time_t recordedAtEpoch = 0;
-    unsigned long recordedAtMs = 0;
-    bool inUse = false;
-    uint8_t uploadRetryCount = 0; // Consecutive upload failures for this entry
-};
-
-// Queue allocated in SPIRAM (DRAM fallback if alloc fails); prioritized over filesystem scan
-constexpr size_t kSdCardMemoryQueueMaxEntries = 50;
+// Per-day pending-upload list on SD: /pending/YYYY/MM/DD/upload_list (append-only)
+// and upload_list.idx (0-based line cursor; incremented on successful upload).
+constexpr const char* kUploadListFileName = "upload_list";
+constexpr const char* kUploadListIndexFileName = "upload_list.idx";
 
 // PSRAM queue functions
 bool psramQueue_begin();
@@ -57,14 +51,11 @@ uint8_t *psramPool_take();
 
 void psramPool_return(uint8_t *ptr);
 
-// SD card pending-path queue (SPIRAM): basename-only; build /pending/YYYY/MM/DD/<basename>
-bool sdCardMemoryQueue_begin();
-bool sdCardMemoryQueue_addRecording(const char* fullPath, time_t recordedAtEpoch, unsigned long recordedAtMs);
-bool sdCardMemoryQueue_buildFullPath(const char* basename, char* out, size_t outLen);
-SdCardMemoryQueueEntry* sdCardMemoryQueue_getNextEntry();
-void sdCardMemoryQueue_releaseEntry(SdCardMemoryQueueEntry* entry);
-size_t sdCardMemoryQueue_getPendingCount();
-bool sdCardMemoryQueue_isEmpty();
+// Append a pending WAV basename to that day's SD upload_list. Source of truth is the card, not RAM.
+bool uploadList_addPending(const char* fullWavPath);
+
+// Advance that day's upload_list.idx past basename after a successful upload (no list rewrite).
+bool uploadList_removePending(const char* fullWavPath);
 
 // Structure for index record data (matches upload tags)
 struct UploadIndexRecord {
@@ -78,9 +69,8 @@ struct UploadIndexRecord {
     time_t uploadedAtEpoch = 0;         // Upload completion epoch
 };
 
-// Get the next file to upload from /pending directory
-// Returns empty string if no files available
-// Files are returned in no particular order (filesystem iteration order)
+// Next pending path from per-day upload_list files (newest day first).
+// Tries /pending/YYYY/MM/DD/upload_list from UTC clock before mutex-heavy tree walk.
 // skipFullPath: optional full path to exclude (e.g. after max upload retries)
 String uploadQueue_getNextFile(const char* skipFullPath = nullptr);
 

@@ -5,7 +5,7 @@
 #ifndef FIRMWARE_PREFIX
 #define FIRMWARE_PREFIX "TANGO"  // Default fallback
 #endif
-#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.02a"
+#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.02b"
 #define CONFIG_VERSION "1.0.0"
 
 // Human-readable product name for UI (browser title, sidebar, API field "product")
@@ -59,11 +59,14 @@
 
 // Upload timeouts. The body deadline is expanded for large files using the minimum
 // expected throughput below; it is not a fixed whole-request deadline.
-#define UPLOAD_BODY_TIMEOUT_MS       60000UL  // Minimum time allowed to send a request body
+#define UPLOAD_BODY_TIMEOUT_MS      90000UL  // Max time to send request body (45s; ~480KB @ ~11 KB/s)
 #define UPLOAD_MIN_BYTES_PER_SECOND   4096UL  // Extend body deadline for links slower than normal WiFi
 #define UPLOAD_WRITE_STALL_TIMEOUT_MS 10000UL // Abort only after this long without forward progress
-#define UPLOAD_TOTAL_TIMEOUT_MS      60000UL  // Minimum time for all endpoint attempts (expanded with body deadline)
-#define UPLOAD_RESPONSE_WAIT_MS      30000UL  // Max time to wait for HTTP response after body
+#define UPLOAD_TOTAL_TIMEOUT_MS     90000UL  // Max time for all endpoint attempts (60s)
+#define UPLOAD_RESPONSE_WAIT_MS     30000UL  // Max time to wait for HTTP response after body
+#define UPLOAD_TCP_CHUNK_SIZE       1024U
+// Brief pause between successful file uploads so WiFi stack can drain before the next POST.
+#define UPLOAD_INTER_FILE_COOLDOWN_MS   500UL
 
 
 #define AUDIO_SAMPLE_BUFFERS 1024
@@ -135,7 +138,7 @@
 #define DEFAULT_LOG_SERIAL_FATAL true
 #define DEFAULT_LOG_SERIAL_ERROR true
 #define DEFAULT_LOG_SERIAL_WARNING true
-#define DEFAULT_LOG_SERIAL_INFO true
+#define DEFAULT_LOG_SERIAL_INFO false
 #define DEFAULT_LOG_SERIAL_DEBUG false
 #define DEFAULT_LOG_SERIAL_EVENT false
 // File: Fatal, Error, Warning, Info, Event enabled; Debug disabled
@@ -160,8 +163,11 @@
 
 // SD card settings
 #define SD_MMC_MAX_OPEN_FILES 8                // Maximum number of simultaneously open files on SD card
+#define SD_BUS_LOCK_TIMEOUT_MS 8000UL          // Max wait for the SD bus lock (WDT is fed while waiting)
+#define SD_BUS_LOCK_WAIT_SLICE_MS 50UL         // Lock-wait slice; WDT is reset each slice
+#define SD_BUS_MOUNT_LOCK_TIMEOUT_MS 20000UL   // Longer wait when mounting/unmounting the card
 
-// Default SD enablement: TANGO ships with SD off until enabled in Advanced; ECHO default on (matches AppSettings init).
+// Default SD enablement: TANGO ships with SD off until enabled in Advanced; EDGE/ECHO default on (matches AppSettings init).
 #if defined(TANGO)
 #define DEFAULT_SD_USE_SD_CARD false
 #define DEFAULT_SD_RECORD_TO_SD_CARD false

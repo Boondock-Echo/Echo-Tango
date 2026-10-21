@@ -206,14 +206,7 @@ namespace
             return;
         }
 
-        // 4) Updating state (legacy NETWORK_STATE_UPDATING) - map to "uploading" here
-        if (system_isUploading())
-        {
-            setLEDStateInternal(LED_APP, LED_BREATHING, GREEN, 2000, 0);
-            setLEDStateInternal(LED_NETWORK, LED_BREATHING, GREEN, 2000, 0);
-            setLEDStateInternal(LED_RADIO, LED_BREATHING, GREEN, 2000, 0);
-            return;
-        }
+        // 4) Updating state (legacy NETWORK_STATE_UPDATING) — OTA/firmware only; not wired here.
 
         // APP LED (legacy applicationState switch)
         // We derive a minimal applicationState:
@@ -273,9 +266,9 @@ namespace
         // NETWORK LED (legacy network state mapping)
         if (wifiConnected)
         {
-            if (system_getUploadQueueSize() > 0)
+            if (system_isUploading())
             {
-                // Legacy had SENDING=GREEN; we treat any queued work as SENDING.
+                // Legacy SENDING: solid green while an upload is active (no queue scan).
                 setLEDStateInternal(LED_NETWORK, LED_SOLID, GREEN, 1000, 2000);
             }
             else if (solidStyle)

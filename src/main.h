@@ -100,16 +100,11 @@ struct AppSettings {
     char mqttKey[kMaxMqttKeyLength + 1];
     uint8_t wifiTxPower;
     bool webserverEnabled;
-    bool speakerEnabled;
-    uint8_t speakerVolume; // 0-100
-    bool transmitEnabled;   // Master TX enable (MQTT tx_on / audio.transmitEnabled)
-    uint8_t transmitVolume; // 0-100 volume used during transmit playback
 
 #if defined(ECHO)
     // Repeater mode (ECHO-only)
     bool repeaterEnabled;
     uint8_t repeaterMode; // 1=simplex, 2=duplex
-#endif
 
     // CW (Morse) settings (stored globally; persisted on explicit save)
     uint8_t cwWpm;          // 5-40 typical
@@ -121,6 +116,13 @@ struct AppSettings {
     uint8_t ledStyle;        // 0=flashing, 1=solid
     uint8_t startupMode;     // see EchoStartupMode numeric values
     bool offlineMode;        // legacy "offline" flag (affects wifi error LED behavior)
+
+    // ECHO speaker and transmission related settings
+    bool speakerEnabled;
+    uint8_t speakerVolume;  // 0-100
+    bool transmitEnabled;   // Master TX enable (MQTT tx_on / audio.transmitEnabled)
+    uint8_t transmitVolume; // 0-100 volume used during transmit playback
+#endif
 };
 
 extern AppSettings appSettings;
@@ -136,7 +138,7 @@ void system_notifySettingsChanged();
 // Clears debounced config-send state after an immediate sendConfigMessage() (e.g. Echo CLI SET).
 void system_clearPendingConfigMessage();
 void system_checkAndStartTasksIfWiFiConfigured(); // Check if WiFi credentials were added and start tasks
-void sendConfigMessage();
+void sendConfigMessage(bool mutexAlreadyHeld = false);
 void sendHealthMessage(bool mutexAlreadyHeld = false);
 
 // Mutex timeout metrics

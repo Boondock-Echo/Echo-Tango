@@ -1,7 +1,7 @@
 #include "health.h"
 
 #include <ArduinoJson.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <esp_task_wdt.h>
 #include <WiFi.h>
 #include <cstring>
@@ -206,19 +206,19 @@ void health_loadYearlySummary()
     char summaryPath[32];
     std::snprintf(summaryPath, sizeof(summaryPath), "/inbox/%04d/summary.json", currentYear);
     
-    if (!SD_MMC.exists(summaryPath))
+    if (!sd_bus::exists(summaryPath))
     {
         // Try to generate it first
         // Feed watchdog before potentially long operation (may iterate through 12 months)
         esp_task_wdt_reset();
         storage_updateYearlySummary(currentYear);
-        if (!SD_MMC.exists(summaryPath))
+        if (!sd_bus::exists(summaryPath))
         {
             return;
         }
     }
     
-    File summaryFile = SD_MMC.open(summaryPath, FILE_READ);
+    sd_bus::SdFile summaryFile = sd_bus::open(summaryPath, FILE_READ);
     if (!summaryFile)
     {
         return;
@@ -371,7 +371,7 @@ void maintenanceTask(void *pvParameters)
             restartTaskIfNeeded(g_healthMetrics.recordTaskHealth, recordTaskHandle,
                                 "RecordTask", recordTask, 8192, 2, 1);
             restartTaskIfNeeded(g_healthMetrics.uploadTaskHealth, networkTaskHandle,
-                              "NetworkTask", networkTask, 16384, 1, 0);
+                              "NetworkTask", networkTask, 16384, 2, 0);
             restartTaskIfNeeded(g_healthMetrics.serialTaskHealth, serialTaskHandle,
                                 "SerialTask", serialTask, kSerialTaskStackSize, 3, 0);
             restartTaskIfNeeded(g_healthMetrics.webServerTaskHealth, webServerTaskHandle, 

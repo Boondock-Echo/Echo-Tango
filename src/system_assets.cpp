@@ -1,7 +1,7 @@
 #include "system_assets.h"
 
 #include <HTTPClient.h>
-#include <SD_MMC.h>
+#include "sd_bus.h"
 #include <esp_task_wdt.h>
 
 #include "config.h"
@@ -30,7 +30,7 @@ namespace
         {
             p = "/" + p;
         }
-        if (SD_MMC.exists(p))
+        if (sd_bus::exists(p))
         {
             return true;
         }
@@ -58,9 +58,9 @@ namespace
                 continue;
             }
             accum += "/" + part;
-            if (!SD_MMC.exists(accum))
+            if (!sd_bus::exists(accum))
             {
-                if (!SD_MMC.mkdir(accum))
+                if (!sd_bus::mkdir(accum))
                 {
                     return false;
                 }
@@ -111,12 +111,12 @@ namespace
 
         // Write to temp then rename (atomic-ish).
         String tmp = String(outPath) + ".tmp";
-        if (SD_MMC.exists(tmp))
+        if (sd_bus::exists(tmp))
         {
-            SD_MMC.remove(tmp);
+            sd_bus::remove(tmp);
         }
 
-        File f = SD_MMC.open(tmp.c_str(), FILE_WRITE);
+        sd_bus::SdFile f = sd_bus::open(tmp.c_str(), FILE_WRITE);
         if (!f)
         {
             http.end();
@@ -152,7 +152,7 @@ namespace
             {
                 f.close();
                 http.end();
-                SD_MMC.remove(tmp);
+                sd_bus::remove(tmp);
                 return false;
             }
             total += written;
@@ -171,18 +171,18 @@ namespace
 
         if (total == 0)
         {
-            SD_MMC.remove(tmp);
+            sd_bus::remove(tmp);
             return false;
         }
 
-        if (SD_MMC.exists(outPath))
+        if (sd_bus::exists(outPath))
         {
-            SD_MMC.remove(outPath);
+            sd_bus::remove(outPath);
         }
-        const bool ok = SD_MMC.rename(tmp.c_str(), outPath);
+        const bool ok = sd_bus::rename(tmp.c_str(), outPath);
         if (!ok)
         {
-            SD_MMC.remove(tmp);
+            sd_bus::remove(tmp);
         }
         return ok;
     }
