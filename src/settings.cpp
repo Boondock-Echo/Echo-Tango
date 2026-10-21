@@ -4626,7 +4626,7 @@ void settings_processSerial()
 
     // Static buffer to accumulate characters until we get a complete line
     static String inputBuffer = "";
-    constexpr size_t kMaxInputLength = 512; // Maximum command length
+    constexpr size_t kMaxInputLength = 4096; // Maximum command length
     
     // Static variable to track current directory for file management commands
     static String currentDirectory = "/";
