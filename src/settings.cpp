@@ -17,19 +17,24 @@
 #include <cstdlib>
 #include <cctype>
 #include <vector>
+#include <new>
+#include <utility>
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include <esp_task_wdt.h>
 #include "logger.h"
+#include "health_performance.h"
 #if defined(ECHO)
 #include "mqtt_task.h"
 #endif
 
 // Serial mutex to prevent interleaving of CLI output with periodic status messages
 static SemaphoreHandle_t g_serialMutex = nullptr;
+static QueueHandle_t g_eventSettingsQueue = nullptr;
 static constexpr TickType_t SERIAL_MUTEX_TIMEOUT_MS = pdMS_TO_TICKS(1000);
 
 // Initialize Serial mutex
@@ -3019,6 +3024,40 @@ bool settings_updateAllFromJson(const String &json, bool saveAsync)
     }
 }
 
+bool settings_queueEventUpdate(const String &json)
+{
+    if (g_eventSettingsQueue == nullptr || json.length() == 0 ||
+        json.length() > kMaxEventSettingsJsonBytes)
+        return false;
+
+    String *payload = new (std::nothrow) String(json);
+    if (payload == nullptr)
+        return false;
+    if (payload->length() != json.length() ||
+        xQueueSend(g_eventSettingsQueue, &payload, 0) != pdTRUE)
+    {
+        delete payload;
+        return false;
+    }
+    return true;
+}
+
+bool settings_takeEventUpdate(String &json)
+{
+    String *payload = nullptr;
+    if (g_eventSettingsQueue == nullptr ||
+        xQueueReceive(g_eventSettingsQueue, &payload, 0) != pdTRUE)
+        return false;
+    json = std::move(*payload);
+    delete payload;
+    return true;
+}
+
+bool settings_hasQueuedEventUpdate()
+{
+    return g_eventSettingsQueue != nullptr && uxQueueMessagesWaiting(g_eventSettingsQueue) > 0;
+}
+
 // Apply a full settings JSON payload that originated from the API server.
 // This behaves like settings_updateAllFromJson(json, false) but:
 // - Strips any WiFi SSID/password fields that were masked as "HIDDEN_FOR_SECURITY"
@@ -3104,6 +3143,7 @@ bool settings_applyJsonFromServer(const String &json)
     // Suppress per-setting change events during bulk apply to avoid loops
     bool previousSuppress = g_suppressSettingChangeEvents;
     g_suppressSettingChangeEvents = true;
+    settings_clearDebounce();
     bool ok = settings_updateAllFromJson(cleanedJson, false);
     g_suppressSettingChangeEvents = previousSuppress;
     return ok;
@@ -3283,6 +3323,8 @@ bool settings_begin()
     // Initialize mutexes
     ensureSettingsMutex();
     ensureSerialMutex();
+    if (g_eventSettingsQueue == nullptr)
+        g_eventSettingsQueue = xQueueCreate(4, sizeof(String *));
     
     // NVS is already initialized by nvs_begin() in main.cpp
     // Just verify we can open the settings namespace
@@ -6283,6 +6325,7 @@ void settings_processSerial()
                     {
                         health_loadYearlySummary();
                         sendHealthMessage(true);
+                        health_performance_print(Serial);
                         cliOk();
                     }
                     else

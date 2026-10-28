@@ -5,7 +5,7 @@
 #ifndef FIRMWARE_PREFIX
 #define FIRMWARE_PREFIX "TANGO"  // Default fallback
 #endif
-#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.02b"
+#define FIRMWARE FIRMWARE_PREFIX "-v2.0.0-beta.02d"
 #define CONFIG_VERSION "1.0.0"
 
 // Human-readable product name for UI (browser title, sidebar, API field "product")

@@ -85,9 +85,6 @@ bool uploadQueue_markUploadedWithRecord(const char* path, const UploadIndexRecor
 // Get count of files pending upload in /pending directory
 size_t uploadQueue_getPendingCount();
 
-// Invalidate cached filesystem pending .wav count (safe from any task; call after pending tree changes)
-void uploadQueue_invalidateFilesystemPendingCountCache();
-
 // Lock/unlock /pending directory for serialized access (recorder and upload task).
 // Only directory operations are serialized: scan, create file, rename, remove. The lock is
 // NOT held while reading file content or uploading; so continuous recording does not block

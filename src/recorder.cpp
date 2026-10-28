@@ -1251,13 +1251,6 @@ namespace
                     logErrorf("[Record] Failed to lock /pending directory for small-file discard\n");
                 }
             }
-            if (isRecordingModeSdCard() &&
-                ((discardedSmallFile && finishedRecordingPath.startsWith("/pending/")) ||
-                 (!discardedSmallFile && finishedRecordingPath.endsWith(".wav") &&
-                  finishedRecordingPath.startsWith("/pending/"))))
-            {
-                uploadQueue_invalidateFilesystemPendingCountCache();
-            }
             if (upload && !finishedRecordingPath.isEmpty() && !discardedSmallFile && renameToWavOk &&
                 finishedRecordingPath.startsWith("/pending/") && finishedRecordingPath.endsWith(".wav"))
             {

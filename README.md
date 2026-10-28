@@ -279,6 +279,24 @@ header with the source change.
 
 ### Suggested validation
 
+The home-page firmware check first queries GitHub Releases from the browser,
+using `beta-tango`/`beta-echo` for beta firmware and `latest-tango`/`latest-echo`
+otherwise. It requires a published `firmware.bin` asset and a versioned release
+title, such as `Tango v2 beta 02c` or `TANGO-v2.0.0-beta.02c`. Moving tag names
+alone do not identify a firmware version. Older or equal releases do not trigger
+an update offer. If GitHub is inaccessible, rate limited, or has unusable release
+metadata, the browser falls back to the device's existing Boondock API check.
+GitHub checks need Internet access on the browser's computer; the fallback needs
+device Wi-Fi and its Boondock API token. GitHub firmware is downloaded and uploaded
+manually through Advanced because the device's current automatic installer accepts
+HTTP URLs only. API-provided updates retain their existing Apply Update action.
+
+Run the firmware-check logic tests without ESP32 hardware:
+
+```bash
+node --test scripts/test_firmware_update.js
+```
+
 For changes shared by both products, build both environments:
 
 ```bash

@@ -186,18 +186,12 @@ namespace
     }
 
     // Cache for change detection
-    String lastHomeSummaryHash = "";
-    String lastNetworkConfigHash = "";
     
-    // WebSocket push timing
-    unsigned long lastHomePush = 0;
+    // Audio WebSocket timing
     unsigned long lastAudioPush = 0;
     unsigned long lastAudioSample = 0;
-    unsigned long lastNetworkPush = 0;
-    const unsigned long HOME_PUSH_INTERVAL = 1000;    // 1 second
     const unsigned long AUDIO_SAMPLE_INTERVAL = 100;   // 0.1 seconds (100ms - collect sample)
     const unsigned long AUDIO_PUSH_INTERVAL = 1000;    // 1 second (send buffer)
-    const unsigned long NETWORK_PUSH_INTERVAL = 1000;  // 1 second
     
     // Audio sample buffer (10 samples per second) for WebSocket
     struct AudioSample {
@@ -354,17 +348,6 @@ namespace
     // Client connection tracking
     unsigned long lastClientActivityMs = 0;
     bool clientWasActive = false;
-    
-    // Simple hash function for change detection
-    static uint32_t simpleHash(const String& str)
-    {
-        uint32_t hash = 0;
-        for (size_t i = 0; i < str.length(); ++i)
-        {
-            hash = ((hash << 5) - hash) + str.charAt(i);
-        }
-        return hash;
-    }
     
     // Simple base64 encoding
     static const char base64_chars[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -1046,8 +1029,6 @@ static void handleMainDeviceInfo()
         doc["ip"] = "Not connected";
     }
     
-    doc["timezoneOffsetHours"] = appSettings.timezone.offsetHours;
-    doc["timezoneDisplay"] = formatTimezoneOffset(appSettings.timezone.offsetHours);
     doc["sdCardMounted"] = isStorageModeSdCard();
     doc["recordToSdCard"] = appSettings.sdCard.recordToSdCard;
     
@@ -1745,62 +1726,16 @@ static void handleMainHomeSummary()
         return;
     
     markClientActivity();
-    // Build hash string from key values
+    // Always send a full snapshot: clients must not share a change-detection hash.
     RecordingStats stats = recorder_getSessionStats();
-    String hashStr = String(getDeviceId()) + "|" + 
-                     String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "NC") + "|" +
-                     String(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "NC") + "|" +
-                     String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + "|" +
-                     String(recorder_isRecording() ? "R" : "I") + "|" +
-                     String(system_isUploading() ? "U" : "I") + "|" +
-                     String(stats.recordingCount) + "|" +
-                     String(stats.uploadedCount) + "|" +
-                     String(stats.errorCount) + "|" +
-                     String(ESP.getFreeHeap() / 1024) + "|" +
-                     String(system_getUploadQueueSize());
-#if defined(ECHO)
-    // Include TX/repeater state in change detection so UI updates immediately.
-    hashStr += "|" + String(appSettings.transmitEnabled ? "TX1" : "TX0");
-    hashStr += "|" + String(appSettings.repeaterEnabled ? "RE1" : "RE0") + "|" + String(static_cast<unsigned>(appSettings.repeaterMode));
-#endif
-    
-    if (isStorageModeSdCard())
-    {
-        uint64_t totalBytes = sd_bus::totalBytes();
-        uint64_t usedBytes = sd_bus::usedBytes();
-        hashStr += "|" + String(totalBytes) + "|" + String(usedBytes);
-    }
-    else
-    {
-        hashStr += "|PSRAM";
-    }
-    
-    String currentHash = String(simpleHash(hashStr));
-    bool changed = (currentHash != lastHomeSummaryHash);
-    
-    if (!changed)
-    {
-        // Minimal response: still send UTC epoch so the SPA can resync the clock every poll
-        DynamicJsonDocument doc(256);
-        doc["changed"] = false;
-        time_t now = 0;
-        time(&now);
-        doc["deviceUtcEpoch"] = static_cast<int64_t>(now);
-        String response;
-        serializeJson(doc, response);
-        mainWebServer->send(200, "application/json", response);
-        return;
-    }
-    
-    // Data changed, send full response
-    lastHomeSummaryHash = currentHash;
-    
-    DynamicJsonDocument doc(3072);
+    DynamicJsonDocument doc(3584);
     doc["changed"] = true;
     doc["deviceId"] = getDeviceId();
+    doc["mac"] = getDeviceId(); // compatibility with /api/device-info
     doc["firmware"] = FIRMWARE;
     doc["product"] = PRODUCT_BROWSER_TITLE;
-    doc["timezoneOffsetHours"] = appSettings.timezone.offsetHours;
+    doc["sdCardMounted"] = isStorageModeSdCard();
+    doc["recordToSdCard"] = appSettings.sdCard.recordToSdCard;
     // Device clock as Unix epoch (UTC); SPA converts to browser local time for display
     time_t now = 0;
     time(&now);
@@ -1809,12 +1744,14 @@ static void handleMainHomeSummary()
     if (WiFi.status() == WL_CONNECTED)
     {
         doc["ipAddress"] = WiFi.localIP().toString();
+        doc["ip"] = WiFi.localIP().toString();
         doc["wifiSsid"] = WiFi.SSID();
         doc["wifiRssi"] = WiFi.RSSI();
     }
     else
     {
         doc["ipAddress"] = "Not connected";
+        doc["ip"] = "Not connected";
         doc["wifiSsid"] = "Not connected";
         doc["wifiRssi"] = 0;
     }
@@ -2598,33 +2535,11 @@ static void handleMainNetworkConfig()
         return;
     
     markClientActivity();
-    // Build hash string from config values
-    String hashStr = "";
-    for (size_t i = 0; i < kMaxWifiCredentials; ++i)
-    {
-        const char* ssid = appSettings.wifi[i].ssid;
-        const char* password = appSettings.wifi[i].password;
-        hashStr += String(ssid ? ssid : "") + "|" +
-                   String(password ? "***" : "") + "|" +  // Don't include actual password
-                   String(appSettings.wifi[i].staticIp) + "|" +
-                   String(appSettings.wifi[i].staticSubnet) + "|" +
-                   String(appSettings.wifi[i].staticGateway) + "|" +
-                   String(appSettings.wifi[i].staticIpEnabled ? "1" : "0") + "|";
-    }
-    
-    String currentHash = String(simpleHash(hashStr));
-    bool changed = (currentHash != lastNetworkConfigHash);
-    
-    // Always send wifiConfigs array, even if data hasn't changed
+    // HTTP network configuration is independent of other clients.
+    // Always send the complete WiFi configuration snapshot
     // This ensures the frontend always receives the 3 network configurations
     DynamicJsonDocument doc(4096);
-    doc["changed"] = changed;
-    
-    if (changed)
-    {
-        // Update hash when data changes
-        lastNetworkConfigHash = currentHash;
-    }
+    doc["changed"] = true;
     
     JsonArray configs = doc.createNestedArray("wifiConfigs");
     
@@ -3632,205 +3547,7 @@ static void handleMainFirmwareApply()
     ESP.restart();
 }
 
-// WebSocket push functions
-void boondock_server_pushHomeData()
-{
-    if (!ws || !asyncServerActive)
-        return;
-    
-    // Check if any clients are subscribed to home
-    bool hasSubscribers = false;
-    for (const auto& sub : clientSubscriptions)
-    {
-        if (sub.page == "home")
-        {
-            hasSubscribers = true;
-            break;
-        }
-    }
-    
-    if (!hasSubscribers)
-        return;
-    
-    // Build home summary data (reuse logic from handleMainHomeSummary)
-    RecordingStats stats = recorder_getSessionStats();
-    String hashStr = String(getDeviceId()) + "|" + 
-                     String(WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "NC") + "|" +
-                     String(WiFi.status() == WL_CONNECTED ? WiFi.SSID() : "NC") + "|" +
-                     String(WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0) + "|" +
-                     String(recorder_isRecording() ? "R" : "I") + "|" +
-                     String(system_isUploading() ? "U" : "I") + "|" +
-                     String(stats.recordingCount) + "|" +
-                     String(stats.uploadedCount) + "|" +
-                     String(stats.errorCount) + "|" +
-                     String(ESP.getFreeHeap() / 1024) + "|" +
-                     String(system_getUploadQueueSize());
-    
-    if (isStorageModeSdCard())
-    {
-        uint64_t totalBytes = sd_bus::totalBytes();
-        uint64_t usedBytes = sd_bus::usedBytes();
-        hashStr += "|" + String(totalBytes) + "|" + String(usedBytes);
-    }
-    else
-    {
-        hashStr += "|PSRAM";
-    }
-    
-    String currentHash = String(simpleHash(hashStr));
-    bool changed = (currentHash != lastHomeSummaryHash);
-    
-    if (!changed)
-    {
-        DynamicJsonDocument doc(512);
-        doc["type"] = "home";
-        doc["changed"] = false;
-        time_t now = 0;
-        time(&now);
-        doc["deviceUtcEpoch"] = static_cast<int64_t>(now);
-        
-        String json;
-        serializeJson(doc, json);
-        
-        // Send to subscribed clients only
-        for (const auto& sub : clientSubscriptions)
-        {
-            if (sub.page == "home")
-            {
-                ws->text(sub.clientId, json);
-            }
-        }
-        return;
-    }
-    
-    // Data changed, send full response
-    lastHomeSummaryHash = currentHash;
-    
-    DynamicJsonDocument doc(3072);
-    doc["type"] = "home";
-    doc["changed"] = true;
-    doc["deviceId"] = getDeviceId();
-    doc["firmware"] = FIRMWARE;
-    doc["product"] = PRODUCT_BROWSER_TITLE;
-    doc["timezoneOffsetHours"] = appSettings.timezone.offsetHours;
-    time_t now = 0;
-    time(&now);
-    doc["deviceUtcEpoch"] = static_cast<int64_t>(now);
-    
-    if (WiFi.status() == WL_CONNECTED)
-    {
-        doc["ipAddress"] = WiFi.localIP().toString();
-        doc["wifiSsid"] = WiFi.SSID();
-        doc["wifiRssi"] = WiFi.RSSI();
-    }
-    else
-    {
-        doc["ipAddress"] = "Not connected";
-        doc["wifiSsid"] = "Not connected";
-        doc["wifiRssi"] = 0;
-    }
-    
-    doc["recordingStatus"] = recorder_isRecording() ? "Recording" : "Idle";
-    doc["uploadingStatus"] = system_isUploading() ? "Uploading" : "Idle";
-    doc["recordingCount"] = stats.recordingCount;
-    doc["uploadedCount"] = stats.uploadedCount;
-    doc["errorCount"] = stats.errorCount;
-    doc["warningCount"] = stats.errorCount;
-
-#if defined(ECHO)
-    // TX status (used by SPA to gate repeater controls)
-    doc["transmitEnabled"] = appSettings.transmitEnabled;
-    doc["repeaterEnabled"] = appSettings.repeaterEnabled;
-    doc["repeaterMode"] = static_cast<unsigned>(appSettings.repeaterMode);
-    doc["repeaterModeLabel"] = (appSettings.repeaterMode == 2) ? "Duplex" : "Simplex";
-#endif
-    
-    if (isStorageModeSdCard())
-    {
-        doc["storageMode"] = "SD Card";
-        uint64_t totalBytes = sd_bus::totalBytes();
-        uint64_t usedBytes = sd_bus::usedBytes();
-        uint64_t freeBytes = totalBytes - usedBytes;
-        float totalGB = totalBytes / (1024.0f * 1024.0f * 1024.0f);
-        doc["storageTotalGB"] = String(totalGB, 2);
-        if (totalBytes > 0)
-        {
-            float usagePct = (usedBytes * 100.0f) / totalBytes;
-            doc["storageUsagePercent"] = String(usagePct, 2);
-        }
-        else
-        {
-            doc["storageUsagePercent"] = "N/A";
-        }
-        doc["storageFree"] = String(freeBytes / 1024 / 1024) + " MB";
-        doc["storageUsed"] = String(usedBytes / 1024 / 1024) + " MB";
-    }
-    else
-    {
-        doc["storageMode"] = "PSRAM";
-        doc["storageTotalGB"] = "N/A";
-        doc["storageUsagePercent"] = "N/A";
-        doc["storageFree"] = "N/A";
-        doc["storageUsed"] = "N/A";
-    }
-    
-    doc["sdCardEnabled"] = appSettings.sdCard.useSdCard;
-    doc["sdCardMode"] = appSettings.sdCard.mode1bit ? "1-bit" : "4-bit";
-    doc["sdCardFrequencyHz"] = appSettings.sdCard.frequency;
-    
-    size_t freeHeap = ESP.getFreeHeap();
-    size_t totalHeap = ESP.getHeapSize();
-    if (totalHeap > 0)
-    {
-        float freePct = (freeHeap * 100.0f) / static_cast<float>(totalHeap);
-        float usedPct = 100.0f - freePct;
-        doc["heapFreePercent"] = String(freePct, 1);
-        doc["heapUsedPercent"] = String(usedPct, 1);
-    }
-    else
-    {
-        doc["heapFreePercent"] = "N/A";
-        doc["heapUsedPercent"] = "N/A";
-    }
-    doc["heapFree"] = String(freeHeap / 1024) + " KB";
-    
-    size_t psramSize = ESP.getPsramSize();
-    size_t freePsram = ESP.getFreePsram();
-    if (psramSize > 0)
-    {
-        float usedPct = ((psramSize - freePsram) * 100.0f) / static_cast<float>(psramSize);
-        doc["psramUsagePercent"] = String(usedPct, 1);
-    }
-    else
-    {
-        doc["psramUsagePercent"] = "N/A";
-    }
-    
-    doc["bootReason"] = getBootReasonString();
-    doc["maintenanceHour"] = appSettings.timezone.maintenanceHour;
-    doc["maintenanceMinute"] = appSettings.timezone.maintenanceMinute;
-    
-    unsigned long uptimeMs = millis();
-    unsigned long uptimeDays = uptimeMs / (24UL * 60UL * 60UL * 1000UL);
-    unsigned long uptimeHours = (uptimeMs % (24UL * 60UL * 60UL * 1000UL)) / (60UL * 60UL * 1000UL);
-    unsigned long uptimeMinutes = (uptimeMs % (60UL * 60UL * 1000UL)) / (60UL * 1000UL);
-    doc["uptime"] = String(uptimeDays) + "d " + String(uptimeHours) + "h " + String(uptimeMinutes) + "m";
-    
-    doc["uploadQueue"] = system_getUploadQueueSize();
-    
-    String json;
-    serializeJson(doc, json);
-    
-    // Send to subscribed clients only
-    for (const auto& sub : clientSubscriptions)
-    {
-        if (sub.page == "home")
-        {
-            ws->text(sub.clientId, json);
-        }
-    }
-}
-
+// Audio WebSocket sampling and streaming.
 void boondock_server_collectAudioSample()
 {
     // Collect a single audio sample into the buffer
@@ -3910,79 +3627,6 @@ void boondock_server_pushAudioStats()
     // Reset buffer after sending
     wsAudioBufferReady = false;
     wsAudioBufferIndex = 0;
-}
-
-void boondock_server_pushNetworkConfig()
-{
-    if (!ws || !asyncServerActive)
-        return;
-    
-    // Check if any clients are subscribed to network
-    bool hasSubscribers = false;
-    for (const auto& sub : clientSubscriptions)
-    {
-        if (sub.page == "network")
-        {
-            hasSubscribers = true;
-            break;
-        }
-    }
-    
-    if (!hasSubscribers)
-        return;
-    
-    // Build network config data (reuse logic from handleMainNetworkConfig)
-    DynamicJsonDocument doc(2048);
-    doc["type"] = "network";
-    
-    JsonArray wifiConfigs = doc.createNestedArray("wifiConfigs");
-    for (size_t i = 0; i < 3; ++i)
-    {
-        JsonObject config = wifiConfigs.createNestedObject();
-        const char* ssid = appSettings.wifi[i].ssid;
-        config["ssid"] = ssid ? ssid : "";
-        config["password"] = ""; // Never send password
-        config["staticIp"] = appSettings.wifi[i].staticIp;
-        config["subnet"] = appSettings.wifi[i].staticSubnet;
-        config["gateway"] = appSettings.wifi[i].staticGateway;
-        config["staticIpEnabled"] = appSettings.wifi[i].staticIpEnabled;
-    }
-    
-    String hashStr = "";
-    for (size_t i = 0; i < 3; ++i)
-    {
-        const char* ssid = appSettings.wifi[i].ssid;
-        hashStr += String(ssid ? ssid : "") + "|";
-        hashStr += String(appSettings.wifi[i].staticIp) + "|";
-        hashStr += String(appSettings.wifi[i].staticSubnet) + "|";
-        hashStr += String(appSettings.wifi[i].staticGateway) + "|";
-        hashStr += String(appSettings.wifi[i].staticIpEnabled ? "1" : "0") + "|";
-    }
-    
-    String currentHash = String(simpleHash(hashStr));
-    bool changed = (currentHash != lastNetworkConfigHash);
-    
-    if (!changed)
-    {
-        doc["changed"] = false;
-    }
-    else
-    {
-        lastNetworkConfigHash = currentHash;
-        doc["changed"] = true;
-    }
-    
-    String json;
-    serializeJson(doc, json);
-    
-    // Send to subscribed clients only
-    for (const auto& sub : clientSubscriptions)
-    {
-        if (sub.page == "network")
-        {
-            ws->text(sub.clientId, json);
-        }
-    }
 }
 
 void boondock_server_pushLiveAudio()
@@ -4261,6 +3905,8 @@ static void setupMainWebServer()
                     
                     if (action == "subscribe")
                     {
+                        // WebSocket is only for audio graph and live audio.
+                        if (page != "audio" && page != "live-audio") return;
                         // Add or update subscription
                         bool found = false;
                         for (auto& sub : clientSubscriptions)
@@ -4407,13 +4053,6 @@ void boondock_server_loop()
     {
         unsigned long now = millis();
         
-        // Push home data every 1 second
-        if (now - lastHomePush >= HOME_PUSH_INTERVAL)
-        {
-            boondock_server_pushHomeData();
-            lastHomePush = now;
-        }
-        
         // Collect audio sample every 100ms
         if (now - lastAudioSample >= AUDIO_SAMPLE_INTERVAL)
         {
@@ -4426,13 +4065,6 @@ void boondock_server_loop()
         {
             boondock_server_pushAudioStats();
             lastAudioPush = now;
-        }
-        
-        // Push network config every 1 second
-        if (now - lastNetworkPush >= NETWORK_PUSH_INTERVAL)
-        {
-            boondock_server_pushNetworkConfig();
-            lastNetworkPush = now;
         }
         
         // Live audio is pushed by a dedicated FreeRTOS task (see liveAudioSenderTask),

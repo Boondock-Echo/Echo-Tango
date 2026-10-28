@@ -72,14 +72,14 @@ bool handleUploadOne()
         return false;
     }
 
-    // 🔹 Credentials check
+    // Credentials check
     if (!network_hasAnyWiFiCredentials())
     {
         logDebugf("[UploadTask] skip reason=no_credentials");
         return false;
     }
 
-    // 🔹 WiFi check
+    // WiFi check
     if (!isWiFiConnected())
     {
         logDebugf("[UploadTask] skip reason=wifi");
@@ -256,6 +256,13 @@ bool handleUploadOne()
         return false;
     }
 
+    // The in-memory counter is initialized at boot and updated with queue changes.
+    // Avoid repeatedly walking /pending while the queue is empty.
+    if (uploadQueue_getPendingCount() == 0)
+    {
+        return false;
+    }
+
     logDebugf("[UploadTask] Checking per-day upload_list (newest day first)");
 
     const char *skipPath = (fsFallbackRetryPath[0] != '\0') ? fsFallbackRetryPath : nullptr;
@@ -351,11 +358,6 @@ bool handleUploadOne()
     if (uploadSuccess)
     {
         logInfof("[UploadTask] SD upload success: %s", request.path);
-
-        if (!uploadQueue_markUploaded(request.path))
-        {
-            logWarnf("[UploadTask] Failed to move file to /inbox: %s", request.path);
-        }
 
         fsFallbackRetryPath[0] = '\0';
         fsFallbackRetryCount = 0;

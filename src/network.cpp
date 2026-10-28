@@ -3208,6 +3208,28 @@ void sendEvent(const String &type, const String &message, JsonObject *settings)
 	
 }
 
+static void queueSettingsFromEventResponse(JsonObjectConst response)
+{
+	JsonVariantConst settings = response["settings"];
+	if (settings.isNull())
+		return;
+	if (!settings.is<JsonObjectConst>())
+	{
+		return;
+	}
+	if (settings.as<JsonObjectConst>().size() == 0)
+		return;
+	if (measureJson(settings) > kMaxEventSettingsJsonBytes)
+	{
+		return;
+	}
+	String json;
+	const size_t expectedLength = measureJson(settings);
+	serializeJson(settings, json);
+	if (json.length() == expectedLength)
+		settings_queueEventUpdate(json);
+}
+
 static void runEventSendForEntry(EventQueueEntry &entry)
 {
 	if (!isWiFiConnected())
@@ -3362,7 +3384,7 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 			{
 				if (!body.isEmpty())
 				{
-					DynamicJsonDocument responseDoc(3072);
+					DynamicJsonDocument responseDoc(8192);
 					DeserializationError jsonError = deserializeJson(responseDoc, body);
 					if (jsonError == DeserializationError::Ok)
 					{
@@ -3385,6 +3407,7 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 												  strstr(message, "received") != nullptr);
 						if (hasSuccessMessage)
 						{
+							queueSettingsFromEventResponse(responseDoc.as<JsonObjectConst>());
 							attemptSuccess = true;
 							sent = true;
 							totalEventCount++;
