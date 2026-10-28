@@ -10,11 +10,7 @@ let globalModalResolve = null;
 let currentAudioThreshold = 30; // Default threshold value
 let currentRoute = 'home';
 let deviceProductTitle = 'Boondock';
-let homeDataInterval = null;
-let audioDataInterval = null;
 let audioGraphInterval = null;
-let networkDataInterval = null;
-let recordingsClockInterval = null;
 let connectionLost = false;
 let isLoading = false;
 let firmwareAutoCheckDone = false;
@@ -94,7 +90,7 @@ function applyDeviceCapabilities(deviceInfo) {
     if (deviceInfo.sdCardMounted && deviceInfo.recordToSdCard) {
         maxMaxRecordingTime = 180;
     }
-    if (deviceInfo.firmware.startsWith('ECHO')) {
+    if ((deviceInfo.firmware || '').startsWith('ECHO')) {
        echoDevice = true;
     }
 }
@@ -107,7 +103,6 @@ function jsonApiOk(data) {
 // WebSocket support
 let ws = null;
 let wsReconnectTimer = null;
-let useWebSocket = true; // Try WebSocket first, fallback to polling
 let wsConnected = false;
 let currentSubscriptions = new Set(); // Track which pages we're subscribed to
 
@@ -167,32 +162,11 @@ const SETTINGS_HELP = {
 
     // System actions
     'adv.reboot': 'Reboot Device restarts the unit without changing any settings or recordings. Use this after firmware updates or configuration changes if the device appears stuck or unresponsive. The device will temporarily go offline during reboot.',
-    'adv.setDefault': 'Set Default restores most configuration values (audio, upload, RTC, SD card, timezone, logs) to factory defaults while preserving WiFi credentials. Use this if settings become confusing or unstable. The device will reboot after applying defaults.',
+    'adv.setDefault': 'Set Default restores most configuration values (audio, upload, RTC, SD card, logs) to factory defaults while preserving WiFi credentials. Use this if settings become confusing or unstable. The device will reboot after applying defaults.',
     'adv.factoryReset': 'Factory Reset erases all stored settings, including WiFi and SD configuration, returning the device to a fresh state. Use this only as a last resort or before transferring ownership. The device will reboot into AP setup mode.'
 };
 
-// Common timezone options (United States first, then others)
-const TIMEZONES = [
-    // US timezones
-    { id: 'US/Pacific', label: 'US Pacific (GMT-8)', offset: -8, isUS: true },
-    { id: 'US/Mountain', label: 'US Mountain (GMT-7)', offset: -7, isUS: true },
-    { id: 'US/Central', label: 'US Central (GMT-6)', offset: -6, isUS: true },
-    { id: 'US/Eastern', label: 'US Eastern (GMT-5)', offset: -5, isUS: true },
-    { id: 'US/Alaska', label: 'US Alaska (GMT-9)', offset: -9, isUS: true },
-    { id: 'US/Hawaii', label: 'US Hawaii (GMT-10)', offset: -10, isUS: true },
 
-    // Other common timezones
-    { id: 'UTC', label: 'UTC (GMT+0)', offset: 0, isUS: false },
-    { id: 'Europe/London', label: 'UK London (GMT+0)', offset: 0, isUS: false },
-    { id: 'Europe/Berlin', label: 'Europe Central (GMT+1)', offset: 1, isUS: false },
-    { id: 'Europe/Helsinki', label: 'Europe Eastern (GMT+2)', offset: 2, isUS: false },
-    { id: 'Asia/Dubai', label: 'Asia Dubai (GMT+4)', offset: 4, isUS: false },
-    { id: 'Asia/Kolkata', label: 'India (GMT+5)', offset: 5, isUS: false },
-    { id: 'Asia/Bangkok', label: 'SE Asia (GMT+7)', offset: 7, isUS: false },
-    { id: 'Asia/Shanghai', label: 'China (GMT+8)', offset: 8, isUS: false },
-    { id: 'Asia/Tokyo', label: 'Japan (GMT+9)', offset: 9, isUS: false },
-    { id: 'Australia/Sydney', label: 'Australia Sydney (GMT+10)', offset: 10, isUS: false }
-];
 
 // Helper to format WiFi RSSI with quality label
 function formatWifiRssi(rssi) {
@@ -736,13 +710,6 @@ const pageTemplates = {
                 <button id="test-sd-card-btn" class="btn-secondary">\uD83E\uDDEA Test SD Card</button>
             </div>
 
-            <h3 style="margin-top:24px;">Timezone</h3>
-            <div class="form-group">
-                <label>Device Timezone</label>
-                <select id="timezone-select" class="form-control"></select>
-                <p class="form-help">Select the local timezone for this device. This is used for scheduling and timestamps.</p>
-            </div>
-
             <h3 style="margin-top:24px;">WiFi Settings</h3>
             <div class="form-group">
                 <label>Local Hostname</label>
@@ -796,7 +763,7 @@ const pageTemplates = {
         </div>
         <div class="advanced-section">
             <h3>System Actions</h3>
-            <p class="form-help">Reboot restarts the device without changing settings. Set Default restores most options (audio, upload regions, timezone, etc.) to factory defaults but keeps WiFi; the device will reboot. Factory Reset erases all settings and WiFi; use only as a last resort—the device will reboot into setup mode.</p>
+            <p class="form-help">Reboot restarts the device without changing settings. Set Default restores most options (audio, upload regions, etc.) to factory defaults but keeps WiFi; the device will reboot. Factory Reset erases all settings and WiFi; use only as a last resort—the device will reboot into setup mode.</p>
             <div class="action-buttons">
                 <button id="reboot-btn" class="btn-secondary btn-warning">\uD83D\uDD04 Reboot Device</button>
                 <button id="set-default-btn" class="btn-secondary">\uD83D\uDD27 Set Default</button>
@@ -931,14 +898,6 @@ function showRebootCountdown() {
 }
 
 function stopAllPolling() {
-    if (homeDataInterval) {
-        clearInterval(homeDataInterval);
-        homeDataInterval = null;
-    }
-    if (audioDataInterval) {
-        clearInterval(audioDataInterval);
-        audioDataInterval = null;
-    }
     if (audioGraphInterval) {
         clearInterval(audioGraphInterval);
         audioGraphInterval = null;
@@ -947,117 +906,23 @@ function stopAllPolling() {
         clearInterval(audioGraphBufferInterval);
         audioGraphBufferInterval = null;
     }
-    if (networkDataInterval) {
-        clearInterval(networkDataInterval);
-        networkDataInterval = null;
-    }
-    if (recordingsClockInterval) {
-        clearInterval(recordingsClockInterval);
-        recordingsClockInterval = null;
-    }
 }
 
-// Pause all polling when tab becomes inactive
 function pausePolling() {
-    if (pollingPaused) return; // Already paused
-    
+    if (pollingPaused) return;
     pollingPaused = true;
-    console.log('Tab inactive - pausing polling');
-    
-    // Stop all intervals
-    if (homeDataInterval) {
-        clearInterval(homeDataInterval);
-        homeDataInterval = null;
-    }
-    if (audioDataInterval) {
-        clearInterval(audioDataInterval);
-        audioDataInterval = null;
-    }
-    // Stop buffer drain; graph draw interval keeps running but drawGraph skips when !isTabVisible
-    if (audioGraphBufferInterval) {
-        clearInterval(audioGraphBufferInterval);
-        audioGraphBufferInterval = null;
-    }
+    clearTimeout(wsReconnectTimer);
+    if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
+    if (audioGraphBufferInterval) { clearInterval(audioGraphBufferInterval); audioGraphBufferInterval = null; }
     audioGraphBuffer.length = 0;
     audioGraphData.length = 0;
-    if (networkDataInterval) {
-        clearInterval(networkDataInterval);
-        networkDataInterval = null;
-    }
-    if (recordingsClockInterval) {
-        clearInterval(recordingsClockInterval);
-        recordingsClockInterval = null;
-    }
-    
-    // Close WebSocket to save resources when tab is inactive
-    if (wsConnected && ws) {
-        ws.close();
-    }
 }
-
-// Resume polling when tab becomes active
 function resumePolling() {
-    if (!pollingPaused) return; // Not paused
-    
+    if (!pollingPaused) return;
     pollingPaused = false;
-    console.log('Tab active - resuming polling');
-    
-    // Reset connection state and try to reconnect
-    connectionLost = false;
-    hideConnectionError();
-    
-    // Reconnect WebSocket if enabled
-    if (useWebSocket && (!ws || ws.readyState !== WebSocket.OPEN)) {
-        connectWebSocket();
-    }
-    
-    // Resume polling based on current route
-    if (currentRoute === 'home') {
-        // Immediately try to load data and then resume polling
-        loadHomeData().then(() => {
-            if (!connectionLost && !homeDataInterval && isTabVisible && !useWebSocket) {
-                homeDataInterval = setInterval(loadHomeData, 1000);
-            }
-        });
-        // Subscribe to WebSocket if connected
-        if (wsConnected && useWebSocket) {
-            subscribeToPage('home');
-        }
-    } else if (currentRoute === 'audio') {
-        // Resume graph drawing first (always needed for audio page)
-        if (!audioGraphInterval && isTabVisible) {
-            initAudioGraph();
-        }
-        // Resume data updates
-        if (wsConnected && useWebSocket) {
-            // WebSocket mode - just subscribe, data comes via WebSocket
-            subscribeToPage('audio');
-            loadAudioData(); // Load initial data
-        } else {
-            // Polling mode - resume polling interval
-            loadAudioData().then(() => {
-                if (!connectionLost && !audioDataInterval && isTabVisible && !useWebSocket) {
-                    audioDataInterval = setInterval(loadAudioData, 500);
-                }
-            });
-        }
-    } else if (currentRoute === 'network') {
-        // Immediately try to load data and then resume polling
-        loadNetworkConfig().then(() => {
-            if (!connectionLost && !networkDataInterval && isTabVisible && !useWebSocket) {
-                networkDataInterval = setInterval(loadNetworkConfig, 1000);
-            }
-        });
-        // Subscribe to WebSocket if connected
-        if (wsConnected && useWebSocket) {
-            subscribeToPage('network');
-        }
-    } else if (currentRoute === 'recordings') {
-        syncDeviceClockFromSummary();
-        if (!recordingsClockInterval && isTabVisible) {
-            recordingsClockInterval = setInterval(syncDeviceClockFromSummary, 5000);
-        }
-    }
+    if (currentRoute === 'audio' || currentRoute === 'live-audio') connectWebSocket();
+    if (currentRoute === 'network') loadNetworkConfig();
+    loadHomeData();
 }
 
 function renderPage(route) {
@@ -1091,23 +956,12 @@ function renderPage(route) {
         titleExtra.innerHTML = '<strong>UTC:</strong> Folder tree and filenames use UTC (your local calendar day may differ).<span class="page-title-extra-tz" id="page-title-extra-tz"></span>';
     }
     
-    // Clear intervals from previous page and unsubscribe from WebSocket
-    // Always unsubscribe from pages that are not the current route (regardless of interval existence)
-    if (route !== 'home') {
-        if (homeDataInterval) {
-            clearInterval(homeDataInterval);
-            homeDataInterval = null;
-        }
-        if (wsConnected) {
-            unsubscribeFromPage('home');
-            console.log('Unsubscribed from home page (navigating to', route, ')');
-        }
+    if (route !== 'audio' && route !== 'live-audio') {
+        clearTimeout(wsReconnectTimer);
+        if (ws && ws.readyState !== WebSocket.CLOSED) ws.close();
     }
+    // Audio subscriptions are the only WebSocket subscriptions.
     if (route !== 'audio') {
-        if (audioDataInterval) {
-            clearInterval(audioDataInterval);
-            audioDataInterval = null;
-        }
         if (audioGraphInterval) {
             clearInterval(audioGraphInterval);
             audioGraphInterval = null;
@@ -1115,16 +969,6 @@ function renderPage(route) {
         if (wsConnected) {
             unsubscribeFromPage('audio');
             console.log('Unsubscribed from audio page (navigating to', route, ')');
-        }
-    }
-    if (route !== 'network') {
-        if (networkDataInterval) {
-            clearInterval(networkDataInterval);
-            networkDataInterval = null;
-        }
-        if (wsConnected) {
-            unsubscribeFromPage('network');
-            console.log('Unsubscribed from network page (navigating to', route, ')');
         }
     }
     if (route !== 'live-audio') {
@@ -1144,10 +988,6 @@ function renderPage(route) {
         }
         // Invalidate in-flight list loads so stale responses cannot clear the table after navigating away
         recordingsTableLoadGeneration++;
-        if (recordingsClockInterval) {
-            clearInterval(recordingsClockInterval);
-            recordingsClockInterval = null;
-        }
         const titleExtraEl = document.getElementById('page-title-extra');
         if (titleExtraEl) {
             titleExtraEl.style.display = 'none';
@@ -1179,15 +1019,16 @@ function renderPage(route) {
 
         // Attach help handlers for any help icons on this page
         initHelpIcons();
+        if ((route === 'audio' || route === 'live-audio') && isTabVisible) connectWebSocket();
     } else {
         contentBody.innerHTML = '<div class="info-message">Page not found</div>';
         hideLoadingPopup();
     }
 }
 
-// Initialize on page load
-// WebSocket connection and message handling
+// WebSocket connection and message handling (audio only)
 function connectWebSocket() {
+    if (!isTabVisible || pollingPaused || (currentRoute !== 'audio' && currentRoute !== 'live-audio')) return;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
         return; // Already connected or connecting
     }
@@ -1200,19 +1041,19 @@ function connectWebSocket() {
         ws.binaryType = 'arraybuffer';
 
         ws.onopen = function() {
+            if (pollingPaused || !isTabVisible || (currentRoute !== 'audio' && currentRoute !== 'live-audio')) {
+                ws.close();
+                return;
+            }
             console.log('WebSocket connected');
             wsConnected = true;
             clearTimeout(wsReconnectTimer);
-            hideConnectionError();
             // Clear any stale subscriptions first
             currentSubscriptions.clear();
             // Subscribe to current page if we're on a page that uses WebSocket
-            if (currentRoute === 'home' || currentRoute === 'audio' || currentRoute === 'network' || currentRoute === 'live-audio') {
+            if (currentRoute === 'audio' || currentRoute === 'live-audio') {
                 subscribeToPage(currentRoute);
                 console.log('Subscribed to', currentRoute, 'after WebSocket connection');
-            }
-            if (currentRoute === 'audio') {
-                loadAudioData();
             }
         };
         
@@ -1224,20 +1065,10 @@ function connectWebSocket() {
             }
             try {
                 const data = JSON.parse(event.data);
-                console.log('WebSocket message received, type:', data.type);
                 
                 // Route messages by type
-                if (data.type === 'home') {
-                    updateHomeDataFromWebSocket(data);
-                } else if (data.type === 'audio') {
-                    let _logDb = data.currentDb;
-                    if (_logDb === undefined && data.samples && data.samples.length) {
-                        _logDb = data.samples[data.samples.length - 1].currentDb;
-                    }
-                    console.log('Audio data received:', _logDb, 'dB');
+                if (data.type === 'audio') {
                     updateAudioDataFromWebSocket(data);
-                } else if (data.type === 'network') {
-                    updateNetworkDataFromWebSocket(data);
                 } else {
                     console.log('[WebSocket] Unknown message type:', data.type);
                 }
@@ -1249,22 +1080,22 @@ function connectWebSocket() {
         ws.onerror = function(error) {
             console.error('WebSocket error:', error);
             wsConnected = false;
-            showConnectionError();
+            // Audio WebSocket failure does not mean HTTP status failure.
         };
         
         ws.onclose = function() {
             console.log('WebSocket disconnected, attempting reconnect...');
             wsConnected = false;
-            showConnectionError();
             currentSubscriptions.clear();
             clearTimeout(wsReconnectTimer);
-            // Reconnect after 2 seconds
-            wsReconnectTimer = setTimeout(connectWebSocket, 2000);
+            if (!pollingPaused && isTabVisible && (currentRoute === 'audio' || currentRoute === 'live-audio')) {
+                wsReconnectTimer = setTimeout(connectWebSocket, 2000);
+            }
         };
     } catch (error) {
         console.error('Error creating WebSocket:', error);
         wsConnected = false;
-        useWebSocket = false; // Fallback to polling
+        // Leave WS enabled for future audio-page reconnects.
     }
 }
 
@@ -1296,13 +1127,10 @@ function unsubscribeFromPage(page) {
 
 document.addEventListener('DOMContentLoaded', function() {
     isTabVisible = !document.hidden;
-    loadDeviceInfo();
-    // Keep device info (firmware/product/device-id) refreshed across all tabs.
-    setInterval(loadDeviceInfo, 15000);
+    // Status refresh begins after initial routing; it never queues.
+    setInterval(loadHomeData, 15000);
     updateTime();
     setInterval(updateTime, 1000);
-    // Keep header clock synced even when not on Home/Recordings.
-    setInterval(syncDeviceClockFromSummary, 5000);
     initMobileSidebar();
     initRouting();
     setupGlobalModal();
@@ -1345,14 +1173,11 @@ document.addEventListener('DOMContentLoaded', function() {
     // Handle initial route
     const route = getRoute();
     navigateTo(route);
+    if (route !== 'home') loadHomeData();
     
     // Attach help handlers for initial content (route will reattach on each render)
     initHelpIcons();
     
-    // Connect WebSocket if enabled
-    if (useWebSocket) {
-        connectWebSocket();
-    }
 });
 
 // Global modal helpers
@@ -1401,91 +1226,6 @@ function initHelpIcons() {
             await showHelpModal(message, title);
         });
     });
-}
-
-async function loadTimezoneFromServer() {
-    const select = document.getElementById('timezone-select');
-    if (!select) return;
-    try {
-        const response = await fetchWithRetry('/api/home/summary', {}, 8000, 2);
-        if (response.ok) {
-            const data = await response.json();
-            if (data && typeof data.timezoneOffsetHours === 'number') {
-                const offsetStr = String(data.timezoneOffsetHours);
-                Array.from(select.options).forEach(opt => {
-                    if (!opt.disabled && opt.value === offsetStr) {
-                        select.value = offsetStr;
-                    }
-                });
-            }
-        }
-    } catch (e) {
-        console.error('Error loading timezone from summary:', e);
-    }
-}
-
-async function initTimezoneControls() {
-    const select = document.getElementById('timezone-select');
-    if (!select) return;
-
-    // Populate options: US first, then separator, then others
-    select.innerHTML = '';
-    const usZones = TIMEZONES.filter(tz => tz.isUS);
-    const otherZones = TIMEZONES.filter(tz => !tz.isUS);
-
-    usZones.forEach(tz => {
-        const opt = document.createElement('option');
-        opt.value = String(tz.offset);
-        opt.textContent = tz.label;
-        select.appendChild(opt);
-    });
-
-    if (otherZones.length > 0) {
-        const sep = document.createElement('option');
-        sep.disabled = true;
-        sep.textContent = '──────────';
-        select.appendChild(sep);
-    }
-
-    otherZones.forEach(tz => {
-        const opt = document.createElement('option');
-        opt.value = String(tz.offset);
-        opt.textContent = tz.label;
-        select.appendChild(opt);
-    });
-
-    await loadTimezoneFromServer();
-}
-
-async function saveTimezoneSettings(skipConfirm) {
-    const select = document.getElementById('timezone-select');
-    if (!select) return true;
-    const offset = parseInt(select.value, 10);
-    if (Number.isNaN(offset)) {
-        if (!skipConfirm) await showInfoModal('Please select a valid timezone.', 'Timezone');
-        return false;
-    }
-    if (!skipConfirm && !await showConfirmModal('Save timezone offset ' + offset + ' hours relative to UTC?', 'Timezone')) {
-        return false;
-    }
-    try {
-        const response = await fetchWithRetry('/api/audio/settings', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({param: 'timezone.offsetHours', value: offset})
-        }, 8000, 2);
-        const data = await response.json();
-        if (response.ok && data.success) {
-            if (!skipConfirm) await showInfoModal('Timezone updated. Device will use the new offset for scheduling and timestamps.', 'Timezone');
-            return true;
-        }
-        if (!skipConfirm) await showInfoModal('Failed to save timezone: ' + (data.message || 'Unknown error'), 'Timezone');
-        return false;
-    } catch (error) {
-        console.error('Error saving timezone:', error);
-        if (!skipConfirm) await showInfoModal('Error saving timezone setting.', 'Timezone');
-        return false;
-    }
 }
 
 function showGlobalModal(options) {
@@ -1747,31 +1487,8 @@ async function fetchWithRetry(url, options = {}, timeoutMs = 10000, maxRetries =
 }
 
 // Common functions
-async function loadDeviceInfo() {
-    try {
-        const response = await fetchWithRetry('/api/device-info', {}, 8000, 2);
-        if (!response.ok) throw new Error('Network response was not ok');
-        const data = await response.json();
-        deviceMac = data.mac || 'Unknown';
-        const deviceIdEl = document.getElementById('device-id');
-        if (deviceIdEl) {
-            deviceIdEl.textContent = deviceMac;
-        }
-        if (document.getElementById('sidebar-firmware')) {
-            document.getElementById('sidebar-firmware').textContent = 'Firmware : ' + (data.firmware || '--');
-        }
-        applyProductBranding(data.product);
-        applyDeviceCapabilities(data);
-        hideConnectionError(); // Connection successful
-    } catch (error) {
-        console.error('Error loading device info:', error);
-        if (error.name === 'AbortError' || error.message.includes('Failed to fetch')) {
-            showConnectionError();
-        }
-    }
-}
-
-// Device clock: Unix UTC epoch from API; header shows browser-local time + UTC subline (ignore device timezone offset for display)
+// Device info now comes from /api/home/summary.
+// Device timestamps are UTC; render them in the browser local timezone.
 let lastDeviceUtcSyncMs = 0;
 let wallMsAtUtcSync = 0;
 
@@ -1817,44 +1534,10 @@ function updateDeviceTimeFromApi(data) {
     applyHeaderClockFromUtcMs(lastDeviceUtcSyncMs);
 }
 
-async function syncDeviceClockFromSummary() {
-    if (!isTabVisible || pollingPaused || connectionLost) {
-        return;
-    }
-    try {
-        const response = await fetchWithRetry('/api/home/summary', {}, 8000, 2);
-        if (!response.ok) {
-            return;
-        }
-        const data = await response.json();
-        updateDeviceTimeFromApi(data);
-    } catch (e) {
-        /* ignore */
-    }
-}
-
 // Home Page
 function initHomePage() {
-    if (connectionLost) {
-        hideLoadingPopup();
-        return;
-    }
-    
-    // Subscribe to WebSocket if connected, otherwise use polling
-    if (wsConnected && useWebSocket) {
-        subscribeToPage('home');
-        hideLoadingPopup();
-        // Load initial data once
-        loadHomeData();
-    } else {
-        loadHomeData().then(() => {
-            hideLoadingPopup();
-            if (!connectionLost && !homeDataInterval && isTabVisible && !useWebSocket) {
-                homeDataInterval = setInterval(loadHomeData, 1000); // Poll every second
-            }
-        });
-    }
-    
+    loadHomeData().finally(hideLoadingPopup);
+
     // Initialize firmware update check button
     const checkFirmwareBtn = document.getElementById('check-firmware-btn');
     if (checkFirmwareBtn) {
@@ -1915,193 +1598,45 @@ function initHomePage() {
     }
 }
 
-// WebSocket update handler for home data
-function updateHomeDataFromWebSocket(data) {
-    hideConnectionError();
-    
-    // Only update UI if data changed
-    if (data.changed === false) {
-        // Still update time even if other data hasn't changed
-        updateDeviceTimeFromApi(data);
-        return; // Nothing changed, skip UI update
-    }
-    
-    updateDeviceTimeFromApi(data);
-    
-    // Update all UI elements (same as loadHomeData)
-    if (document.getElementById('device-id-value')) {
-        document.getElementById('device-id-value').textContent = data.deviceId || '--';
-    }
-    if (document.getElementById('firmware-version')) {
-        document.getElementById('firmware-version').textContent = data.firmware || '--';
-    }
-    if (document.getElementById('sidebar-firmware')) {
-        document.getElementById('sidebar-firmware').textContent = 'Firmware : ' + (data.firmware || '--');
-    }
-    applyProductBranding(data.product);
-    applyDeviceCapabilities(data);
-    if (document.getElementById('ip-address')) {
-        document.getElementById('ip-address').textContent = data.ipAddress || '--';
-    }
-    if (document.getElementById('wifi-ssid')) {
-        document.getElementById('wifi-ssid').textContent = data.wifiSsid || '--';
-    }
-    if (document.getElementById('wifi-rssi')) {
-        document.getElementById('wifi-rssi').textContent = formatWifiRssi(data.wifiRssi);
-    }
-    if (document.getElementById('recording-status')) {
-        const el = document.getElementById('recording-status');
-        el.textContent = data.recordingStatus || '--';
-        if (data.recordingStatus === 'Recording') {
-            el.classList.add('status-flash');
-        } else {
-            el.classList.remove('status-flash');
-        }
-    }
-    if (document.getElementById('uploading-status')) {
-        const el = document.getElementById('uploading-status');
-        el.textContent = data.uploadingStatus || '--';
-        if (data.uploadingStatus === 'Uploading') {
-            el.classList.add('status-flash');
-        } else {
-            el.classList.remove('status-flash');
-        }
-    }
-    if (document.getElementById('recording-count')) {
-        document.getElementById('recording-count').textContent = data.recordingCount || '--';
-    }
-    if (document.getElementById('uploaded-count')) {
-        const uploadedCount = data.uploadedCount !== undefined ? data.uploadedCount : '--';
-        const queueCount = data.uploadQueue !== undefined ? data.uploadQueue : 0;
-        if (uploadedCount === '--') {
-            document.getElementById('uploaded-count').textContent = '--';
-        } else {
-            document.getElementById('uploaded-count').textContent = `${uploadedCount} (${queueCount})`;
-        }
-    }
-    if (document.getElementById('error-count')) {
-        document.getElementById('error-count').textContent = data.errorCount || '--';
-    }
-    if (document.getElementById('storage-mode')) {
-        document.getElementById('storage-mode').textContent = data.storageMode || '--';
-    }
-    if (document.getElementById('storage-total')) {
-        if (data.storageTotalGB && data.storageTotalGB !== 'N/A') {
-            document.getElementById('storage-total').textContent = data.storageTotalGB + ' GB';
-        } else {
-            document.getElementById('storage-total').textContent = '--';
-        }
-    }
-    if (document.getElementById('storage-usage')) {
-        if (data.storageUsagePercent && data.storageUsagePercent !== 'N/A') {
-            document.getElementById('storage-usage').textContent = data.storageUsagePercent + '%';
-        } else {
-            document.getElementById('storage-usage').textContent = '--';
-        }
-    }
-    if (document.getElementById('sd-enabled')) {
-        if (typeof data.sdCardEnabled === 'boolean') {
-            document.getElementById('sd-enabled').textContent = data.sdCardEnabled ? 'Enabled' : 'Disabled';
-        } else {
-            document.getElementById('sd-enabled').textContent = '--';
-        }
-    }
-    if (document.getElementById('sd-mode-speed')) {
-        const el = document.getElementById('sd-mode-speed');
-        if (typeof data.sdCardEnabled === 'boolean' && !data.sdCardEnabled) {
-            el.textContent = 'N/A';
-        } else if (data.sdCardMode && data.sdCardFrequencyHz) {
-            const mhz = (data.sdCardFrequencyHz / 1000000).toFixed(1).replace(/\.0$/, '');
-            el.textContent = data.sdCardMode + ' @ ' + mhz + ' MHz';
-        } else {
-            el.textContent = '--';
-        }
-    }
-    if (document.getElementById('heap-free')) {
-        if (data.heapUsedPercent && data.heapUsedPercent !== 'N/A') {
-            document.getElementById('heap-free').textContent = data.heapUsedPercent + '% used';
-        } else if (data.heapFreePercent && data.heapFreePercent !== 'N/A') {
-            const usedPct = (100.0 - parseFloat(data.heapFreePercent)).toFixed(1);
-            document.getElementById('heap-free').textContent = usedPct + '% used';
-        } else if (data.heapFree) {
-            document.getElementById('heap-free').textContent = data.heapFree;
-        } else {
-            document.getElementById('heap-free').textContent = '--';
-        }
-    }
-    if (document.getElementById('psram-usage')) {
-        document.getElementById('psram-usage').textContent = data.psramUsagePercent && data.psramUsagePercent !== 'N/A'
-            ? data.psramUsagePercent + '% used'
-            : 'N/A';
-    }
-    if (document.getElementById('boot-reason')) {
-        document.getElementById('boot-reason').textContent = data.bootReason || '--';
-    }
-    if (document.getElementById('maintenance-time')) {
-        if (typeof data.maintenanceHour === 'number' && typeof data.maintenanceMinute === 'number') {
-            const h = data.maintenanceHour;
-            const m = data.maintenanceMinute;
-            const date = new Date();
-            date.setHours(h);
-            date.setMinutes(m);
-            const timeStr = date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-            document.getElementById('maintenance-time').textContent = timeStr;
-        } else {
-            document.getElementById('maintenance-time').textContent = '--';
-        }
-    }
-    if (document.getElementById('uptime')) {
-        document.getElementById('uptime').textContent = data.uptime || '--';
-    }
-
-    // Repeater controls (ECHO only; fields absent on other builds)
-    const repCard = document.getElementById('repeater-card');
-    const repEnabled = document.getElementById('repeater-enabled');
-    const repSimplex = document.getElementById('repeater-mode-simplex');
-    const repDuplex = document.getElementById('repeater-mode-duplex');
-    const repStatus = document.getElementById('repeater-status');
-    if (repCard && typeof data.repeaterEnabled !== 'boolean') {
-        repCard.style.display = 'none';
-    } else if (repCard) {
-        repCard.style.display = '';
-    }
-    if (repEnabled && typeof data.repeaterEnabled === 'boolean') {
-        const txOk = (typeof data.transmitEnabled === 'boolean') ? !!data.transmitEnabled : true;
-        repEnabled.checked = !!data.repeaterEnabled;
-        const enabledNow = !!data.repeaterEnabled && txOk;
-        repEnabled.disabled = !txOk;
-        if (repSimplex) repSimplex.disabled = !enabledNow;
-        if (repDuplex) repDuplex.disabled = !enabledNow;
-        const mode = (data.repeaterMode !== undefined) ? Number(data.repeaterMode) : 1;
-        if (repSimplex) repSimplex.checked = (mode === 1);
-        if (repDuplex) repDuplex.checked = (mode === 2);
-        if (repStatus) repStatus.textContent = !txOk ? 'Enable TX to use repeater' : (enabledNow ? ((mode === 2) ? 'Duplex' : 'Simplex') : 'Disabled');
+let lastHomeSummary = null;
+function updateRecordingsSummaryDetails(data) {
+    lastHomeSummary = data;
+    const sh = document.getElementById('recordings-storage-hint');
+    if (!sh) return;
+    if (data.sdCardMounted === false) {
+        sh.textContent = 'SD card is not mounted. The recordings list lives on the SD card—insert a card, enable SD storage in settings, and reboot. PSRAM-only recordings do not appear here.';
+    } else if (data.recordToSdCard === false) {
+        sh.textContent = '“Record to SD card” is off. Turn it on in Advanced / SD settings to build the recordings catalog; PSRAM-only clips are not listed.';
+    } else {
+        sh.textContent = '';
     }
 }
-
+let homeSummaryInFlight = false;
+let lastHomeSummaryRequestAt = 0;
 async function loadHomeData() {
+    if (homeSummaryInFlight || (lastHomeSummaryRequestAt && Date.now() - lastHomeSummaryRequestAt < 15000)) return;
     // Don't poll if tab is not visible
     if (!isTabVisible || pollingPaused) {
         return;
     }
     
-    if (connectionLost) return;
+    homeSummaryInFlight = true;
+    lastHomeSummaryRequestAt = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
     try {
-        const response = await fetchWithRetry('/api/home/summary', {}, 8000, 2);
+        const response = await fetch('/api/home/summary', {signal: controller.signal, cache: 'no-store'});
         if (!response.ok) throw new Error('Network response was not ok');
         const data = await response.json();
         
         hideConnectionError(); // Connection successful
-        
-        // Only update UI if data changed
-        if (data.changed === false) {
-            // Still update time even if other data hasn't changed
-            updateDeviceTimeFromApi(data);
-            return; // Nothing changed, skip UI update
-        }
-        
+        applyDeviceCapabilities(data);
+        applyProductBranding(data.product);
+        updateRecordingsSummaryDetails(data);
         updateDeviceTimeFromApi(data);
         
+        deviceMac = data.deviceId || deviceMac;
+        if (document.getElementById('device-id')) document.getElementById('device-id').textContent = deviceMac;
         if (document.getElementById('device-id-value')) {
             document.getElementById('device-id-value').textContent = data.deviceId || '--';
         }
@@ -2111,8 +1646,6 @@ async function loadHomeData() {
         if (document.getElementById('sidebar-firmware')) {
             document.getElementById('sidebar-firmware').textContent = 'Firmware : ' + (data.firmware || '--');
         }
-        applyProductBranding(data.product);
-        applyDeviceCapabilities(data);
         if (document.getElementById('ip-address')) {
             document.getElementById('ip-address').textContent = data.ipAddress || '--';
         }
@@ -2141,7 +1674,7 @@ async function loadHomeData() {
             }
         }
         if (document.getElementById('recording-count')) {
-            document.getElementById('recording-count').textContent = data.recordingCount || '--';
+            document.getElementById('recording-count').textContent = data.recordingCount ?? '--';
         }
         if (document.getElementById('uploaded-count')) {
             const uploadedCount = data.uploadedCount !== undefined ? data.uploadedCount : '--';
@@ -2153,7 +1686,7 @@ async function loadHomeData() {
             }
         }
         if (document.getElementById('error-count')) {
-            document.getElementById('error-count').textContent = data.errorCount || '--';
+            document.getElementById('error-count').textContent = data.errorCount ?? '--';
         }
         if (document.getElementById('storage-mode')) {
             document.getElementById('storage-mode').textContent = data.storageMode || '--';
@@ -2257,16 +1790,94 @@ async function loadHomeData() {
         // Only show connection error for actual network failures
         if (error.name === 'AbortError') {
             // Timeout occurred, but don't treat as connection lost
-            // The retry logic should handle this
+            // Wait for the next scheduled status update
             hideLoadingPopup();
             return;
         }
         if (error.message && error.message.includes('Failed to fetch')) {
-            // Only show connection error after retries have been exhausted
-            showConnectionError();
+            // Keep the current status displayed until the next scheduled refresh
+            // Keep the existing data visible; retry on the next 15-second tick.
         }
         hideLoadingPopup();
+    } finally {
+        clearTimeout(timeout);
+        homeSummaryInFlight = false;
     }
+}
+
+function parseFirmwareVersion(value) {
+    const match = /^(?:TANGO-|ECHO-)?v?(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+)([a-z]?))?$/i.exec(value);
+    if (!match) throw new Error('Unrecognized firmware version');
+    const stages = { alpha: 0, beta: 1, rc: 2 };
+    return [Number(match[1]), Number(match[2]), Number(match[3]),
+        match[4] ? stages[match[4].toLowerCase()] : 3,
+        Number(match[5] || 0), (match[6] || '').toLowerCase()];
+}
+
+function isNewerFirmware(candidate, current) {
+    const next = parseFirmwareVersion(candidate);
+    const installed = parseFirmwareVersion(current);
+    for (let i = 0; i < next.length; i++) {
+        if (next[i] !== installed[i]) return next[i] > installed[i];
+    }
+    return false;
+}
+
+async function checkGithubFirmware(current) {
+    const model = /^(TANGO|ECHO)-/i.exec(current);
+    if (!model) throw new Error('Unknown device model');
+    parseFirmwareVersion(current);
+    const product = model[1].toLowerCase();
+    const tag = `${current.includes('-beta.') ? 'beta' : 'latest'}-${product}`;
+    const response = await fetchWithRetry(
+        `https://api.github.com/repos/Boondock-Echo/Echo-Tango/releases/tags/${tag}`,
+        { credentials: 'omit', headers: { Accept: 'application/vnd.github+json' } }, 5000, 1);
+    if (!response.ok) throw new Error(`GitHub returned HTTP ${response.status}`);
+    const release = await response.json();
+    if (release.draft || release.tag_name !== tag || !Array.isArray(release.assets)) {
+        throw new Error('Invalid GitHub release');
+    }
+    const asset = release.assets.find(item => item.name === 'firmware.bin' && item.state === 'uploaded');
+    const expectedUrl = `https://github.com/Boondock-Echo/Echo-Tango/releases/download/${tag}/firmware.bin`;
+    if (!asset || asset.browser_download_url !== expectedUrl) throw new Error('Firmware asset unavailable');
+    // Moving tags do not contain a version. Accept the published release title
+    // (e.g. "Tango v2 beta 02c") or a full model-prefixed firmware version.
+    const title = typeof release.name === 'string' ? release.name.trim() : '';
+    const shortTitle = /^(TANGO|ECHO) v(\d+) beta (\d+[a-z]?)$/i.exec(title);
+    let version;
+    if (shortTitle && shortTitle[1].toLowerCase() === product) {
+        version = `${model[1]}-v${shortTitle[2]}.0.0-beta.${shortTitle[3]}`;
+    } else if (title.toUpperCase().startsWith(`${model[1].toUpperCase()}-`)) {
+        version = title;
+    } else {
+        throw new Error('Release version unavailable');
+    }
+    parseFirmwareVersion(version);
+    if (release.prerelease && !/-alpha\.|-beta\.|-rc\./.test(current)) {
+        throw new Error('Stable release unavailable');
+    }
+    const available = isNewerFirmware(version, current);
+    return {
+        success: true,
+        upgrade_available: available,
+        download_link: expectedUrl,
+        source: 'github',
+        message: available
+            ? `${version} is available on GitHub. Download it, then upload the file under Advanced.`
+            : 'Your firmware is up to date with the GitHub release for this device.'
+    };
+}
+
+async function getFirmwareUpdateInfo() {
+    const version = document.getElementById('firmware-version');
+    try {
+        return await checkGithubFirmware(version ? version.textContent.trim() : '');
+    } catch (error) {
+        console.info('GitHub firmware check unavailable; trying device API:', error.message);
+    }
+    const response = await fetchWithRetry('/api/firmware/check', {}, 15000, 2);
+    if (!response.ok) throw new Error('Network response was not ok');
+    return response.json();
 }
 
 async function checkFirmwareUpdate() {
@@ -2283,9 +1894,9 @@ async function checkFirmwareUpdate() {
     resultDiv.style.display = 'none';
     
     try {
-        const response = await fetchWithRetry('/api/firmware/check', {}, 15000, 2);
-        if (!response.ok) throw new Error('Network response was not ok');
-        const data = await response.json();
+        const data = await getFirmwareUpdateInfo();
+        const applyBtn = document.getElementById('apply-firmware-btn');
+        if (applyBtn) applyBtn.style.display = data.source === 'github' ? 'none' : '';
         
         resultDiv.style.display = 'block';
         
@@ -2294,14 +1905,14 @@ async function checkFirmwareUpdate() {
             messageDiv.style.color = '#d32f2f';
             actionsDiv.style.display = 'none';
         } else if (data.upgrade_available === true && data.download_link) {
-            messageDiv.innerHTML = '<strong>Update Available!</strong><br>' + (data.message || 'A new firmware version is available.');
+            messageDiv.textContent = 'Update Available! ' + (data.message || 'A new firmware version is available.');
             messageDiv.style.color = '#2e7d32';
             actionsDiv.style.display = 'block';
             downloadLink.href = data.download_link;
             downloadLink.textContent = '\uD83D\uDCE5 Download Firmware';
             downloadLink.setAttribute('data-download-link', data.download_link);
         } else {
-            messageDiv.innerHTML = '<strong>Up to Date</strong><br>' + (data.message || 'Your device is running the latest firmware version.');
+            messageDiv.textContent = 'Up to Date. ' + (data.message || 'Your device is running the latest firmware version.');
             messageDiv.style.color = '#1976d2';
             actionsDiv.style.display = 'none';
         }
@@ -2373,30 +1984,14 @@ async function applyFirmwareUpdate() {
 
 // Audio Page
 function initAudioPage() {
-    if (connectionLost) {
-        hideLoadingPopup();
-        return;
-    }
-    
     // Always initialize graph first (it draws every 100ms regardless of data source)
     if (isTabVisible) {
         initAudioGraph();
     }
     
-    // Subscribe to WebSocket if connected, otherwise use polling
-    if (wsConnected && useWebSocket) {
-        subscribeToPage('audio');
-        hideLoadingPopup();
-        // Load initial data once
-        loadAudioData();
-    } else {
-        loadAudioData().then(() => {
-            hideLoadingPopup();
-            if (!connectionLost && !audioDataInterval && isTabVisible && !useWebSocket) {
-                audioDataInterval = setInterval(loadAudioData, 500);
-            }
-        });
-    }
+    // Audio graph uses WebSocket only. The connection callback subscribes on open.
+    if (wsConnected) subscribeToPage('audio');
+    hideLoadingPopup();
     loadAudioSettings();
     initAudioControls();
 }
@@ -2464,7 +2059,7 @@ function initLiveAudioPage() {
     }
     
     // Subscribe to WebSocket for live audio
-    if (wsConnected && useWebSocket) {
+    if (wsConnected) {
         subscribeToPage('live-audio');
         console.log('[LiveAudio] Subscribed to WebSocket');
     } else {
@@ -3009,39 +2604,14 @@ function initRecordingsPage() {
         recordingsPagBarInit.style.display = 'none';
     }
 
-    syncDeviceClockFromSummary();
-    if (recordingsClockInterval) {
-        clearInterval(recordingsClockInterval);
-        recordingsClockInterval = null;
+    // The globally refreshed /api/home/summary supplies clock and device capabilities.
+    const tzSlot = document.getElementById('page-title-extra-tz');
+    if (tzSlot) {
+        let tzName = '';
+        try { tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) {}
+        tzSlot.textContent = ' “Recorded” uses this browser’s local time' + (tzName ? ' (' + tzName + ').' : '.');
     }
-    recordingsClockInterval = setInterval(syncDeviceClockFromSummary, 5000);
-
-    fetch('/api/device-info')
-        .then(function(r) { return r.json(); })
-        .then(function(d) {
-            applyProductBranding(d.product);
-            applyDeviceCapabilities(d);
-            const tzSlot = document.getElementById('page-title-extra-tz');
-            if (tzSlot) {
-                var tzName = '';
-                try {
-                    tzName = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-                } catch (e2) {}
-                tzSlot.textContent = ' \u201cRecorded\u201d uses this browser\u2019s local time' +
-                    (tzName ? ' (' + tzName + ').' : '.');
-            }
-            const sh = document.getElementById('recordings-storage-hint');
-            if (sh) {
-                if (d.sdCardMounted === false) {
-                    sh.textContent = 'SD card is not mounted. The recordings list lives on the SD card—insert a card, enable SD storage in settings, and reboot. PSRAM-only recordings do not appear here.';
-                } else if (d.recordToSdCard === false) {
-                    sh.textContent = '“Record to SD card” is off. Turn it on in Advanced / SD settings to build the recordings catalog; PSRAM-only clips are not listed.';
-                } else {
-                    sh.textContent = '';
-                }
-            }
-        })
-        .catch(function() {});
+    if (lastHomeSummary) updateRecordingsSummaryDetails(lastHomeSummary);
 
     const prevBtn = document.getElementById('recordings-prev-page');
     const nextBtn = document.getElementById('recordings-next-page');
@@ -3236,11 +2806,11 @@ function startLiveAudio() {
     console.log('[LiveAudio] Starting live audio...');
     
     // Request WebSocket subscription if not already subscribed
-    if (wsConnected && useWebSocket) {
+    if (wsConnected) {
         subscribeToPage('live-audio');
         console.log('[LiveAudio] Subscribed to live-audio page');
     } else {
-        console.warn('[LiveAudio] WebSocket not connected! wsConnected:', wsConnected, 'useWebSocket:', useWebSocket);
+        console.warn('[LiveAudio] WebSocket not connected! wsConnected:', wsConnected);
     }
     
     // Initialize Web Audio API
@@ -4859,13 +4429,12 @@ async function loadAudioData() {
         
         hideConnectionError(); // Connection successful
         
-        // Use same update logic as WebSocket handler
+        // Render HTTP configuration response
         updateAudioDataFromWebSocket(data);
     } catch (error) {
         console.error('Error loading audio data:', error);
         if (error.name === 'AbortError' || error.message.includes('Failed to fetch')) {
             showConnectionError();
-            stopAllPolling();
         }
     }
 }
@@ -4874,10 +4443,6 @@ async function loadAudioData() {
 let networkConfigInitialized = false;
 
 function initNetworkPage() {
-    if (connectionLost) {
-        hideLoadingPopup();
-        return;
-    }
     networkConfigInitialized = false; // Reset on page init
     
     // Common Save/Cancel for Network page
@@ -4918,25 +4483,12 @@ function initNetworkPage() {
     }
     clearNetworkDirty();
     
-    // Subscribe to WebSocket if connected, otherwise use polling
-    if (wsConnected && useWebSocket) {
-        subscribeToPage('network');
-        hideLoadingPopup();
-        // Load initial data once
-        loadNetworkConfig();
-    } else {
-        loadNetworkConfig().then(() => {
-            hideLoadingPopup();
-            if (!connectionLost && !networkDataInterval && isTabVisible && !useWebSocket) {
-                // Poll every second for network config changes
-                networkDataInterval = setInterval(loadNetworkConfig, 1000);
-            }
-        });
-    }
+    // Network is loaded when opened or saved, not continuously.
+    loadNetworkConfig().finally(hideLoadingPopup);
 }
 
-// WebSocket update handler for network config
-function updateNetworkDataFromWebSocket(data) {
+// HTTP response renderer for network config
+function renderNetworkConfig(data) {
     hideConnectionError();
     
     const container = document.getElementById('wifi-configs');
@@ -4946,9 +4498,6 @@ function updateNetworkDataFromWebSocket(data) {
     }
     
     // Only skip UI update if data hasn't changed AND we've already initialized
-    if (data.changed === false && networkConfigInitialized) {
-        return; // Nothing changed, skip UI update
-    }
     
     // Mark as initialized after first successful load
     networkConfigInitialized = true;
@@ -5034,7 +4583,6 @@ async function loadNetworkConfig() {
         return;
     }
     
-    if (connectionLost) return;
     try {
         const response = await fetchWithRetry('/api/network/config', {}, 8000, 2);
         if (!response.ok) throw new Error('Network response was not ok');
@@ -5042,10 +4590,10 @@ async function loadNetworkConfig() {
         
         hideConnectionError(); // Connection successful
         
-        // Use same update logic as WebSocket handler
-        updateNetworkDataFromWebSocket(data);
+        // Render HTTP configuration response
+        renderNetworkConfig(data);
         
-        // The rest of the rendering is now in updateNetworkDataFromWebSocket
+        // The rest of the rendering is now in renderNetworkConfig
         return;
         
         // Old code below (kept for reference but should not execute)
@@ -5267,7 +4815,6 @@ function initAdvancedPage() {
     if (advancedCancelBtn) {
         advancedCancelBtn.addEventListener('click', async function() {
             await loadSdCardSettings();
-            await loadTimezoneFromServer();
             await loadWifiTxPowerSettings();
             await loadUploadLocations();
             clearAdvancedDirty();
@@ -5275,10 +4822,9 @@ function initAdvancedPage() {
     }
     if (advancedSaveBtn) {
         advancedSaveBtn.addEventListener('click', async function() {
-            if (!await showConfirmModal('Save all changes to SD card, timezone, WiFi Tx Power, and upload locations?', 'Save Advanced Settings')) return;
+            if (!await showConfirmModal('Save all changes to SD card, WiFi Tx Power, and upload locations?', 'Save Advanced Settings')) return;
             let ok = true;
             ok = await saveSdCardSettings(true) && ok;
-            ok = await saveTimezoneSettings(true) && ok;
             ok = await saveWifiTxPowerSettings(true) && ok;
             ok = await saveUploadLocations(true) && ok;
             if (ok) {
@@ -5376,11 +4922,6 @@ function initAdvancedPage() {
         });
     }
     loadWifiTxPowerSettings();
-
-    // Timezone controls: mark dirty on change
-    const timezoneSelect = document.getElementById('timezone-select');
-    if (timezoneSelect) timezoneSelect.addEventListener('change', setAdvancedDirty);
-    initTimezoneControls();
 
     // After all loads, ensure Save is disabled until user changes something
     clearAdvancedDirty();
@@ -5501,7 +5042,7 @@ async function setDefaultSettings() {
     if (!await showConfirmModal('Set Default will reset all settings to default values, but keep WiFi settings. Continue?', 'Set Default')) {
         return;
     }
-    if (!await showConfirmModal('Are you sure? This will reset all audio, upload, RTC, SD card, timezone, and log settings to defaults. WiFi settings will be preserved.', 'Set Default')) {
+    if (!await showConfirmModal('Are you sure? This will reset all audio, upload, RTC, SD card, and log settings to defaults. WiFi settings will be preserved.', 'Set Default')) {
         return;
     }
     try {

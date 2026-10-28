@@ -55,6 +55,11 @@ bool settings_updateAllFromJson(const String &json, bool saveAsync = true);
 // during the update to avoid event loops.
 bool settings_applyJsonFromServer(const String &json);
 
+constexpr size_t kMaxEventSettingsJsonBytes = 4096;
+bool settings_queueEventUpdate(const String &json);
+bool settings_takeEventUpdate(String &json);
+bool settings_hasQueuedEventUpdate();
+
 // Enable/disable per-setting change events (used internally to avoid loops).
 void settings_setChangeEventsSuppressed(bool suppressed);
 

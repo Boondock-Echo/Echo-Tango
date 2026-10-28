@@ -273,10 +273,50 @@ Posts a device lifecycle or status event. Uses a plain JSON body (not multipart)
 ### Success Response
 
 ```json
-{ "message": "Event received", "timestamp": "2026-03-13T14:30:01Z" }
+{
+  "message": "Event received",
+  "timestamp": "2026-10-27T18:30:00Z",
+  "token": "<API bearer token>",
+  "settings": {
+    "a": {
+      "ath": 35
+    }
+  }
+}
 ```
 
-The firmware accepts `"timestamp"` or `"current_time"` in the response to sync the device clock. An HTTP 200 with an empty body is also treated as success.
+| Field | Required | Firmware behavior |
+|-------|----------|-------------------|
+| `message` | For a nonempty response | Receipt confirmation containing `received`. |
+| `timestamp` | No | ISO clock time; `current_time` is also accepted. |
+| `token` | No | Store or refresh the API bearer token. |
+| `settings` | No | A settings JSON object to apply and save to NVS in MaintenanceTask. |
+
+When a user changes cloud settings, the API can attach the updated settings to
+its next successful events response. Omit `settings` when there is no update.
+There is no separate periodic settings GET and no settings-revision field is
+required. Any event can deliver an update, including the existing roughly
+once-per-minute `ping` heartbeat. Upload activity, event queues, and network
+availability can delay delivery.
+
+The object uses the existing settings schema below (the example changes audio
+threshold). Existing validation, masked-credential handling, and reboot requirements
+apply. Missing, null, and empty-object `settings` values are no-ops; other types
+are ignored. Serialized settings are limited to 4096 bytes and must fit the existing settings parser. Token and clock handling are preserved
+when settings are present.
+
+Settings are copied into a bounded four-entry FIFO before the response document
+is released. MaintenanceTask applies them outside the networking handler and
+retries a failed apply/save locally every 30 seconds without making another HTTP
+request. A newer queued update can
+supersede a failed pending update. Identical successfully applied inline updates
+are skipped within the current boot to avoid repeated NVS writes and event loops.
+Queue/allocation/size rejection requires the API to resend.
+The existing generic `settings_updated` event is emitted after a successful NVS
+save; it is not a revision-specific delivery acknowledgment.
+
+Responses without `settings` remain compatible. HTTP 2xx with an empty body is
+also treated as event success.
 
 ---
 
@@ -416,6 +456,17 @@ Connection: close
 
 Full settings JSON body (same schema as the `settings` field in the Push endpoint).
 The firmware applies the body directly to the device configuration.
+
+### Automatic updates while online
+
+Ongoing updates arrive in the optional `settings` object of an events response,
+as documented above. Settings synchronization does not emit diagnostic serial
+messages. Devices do not poll this endpoint every 30 seconds. The
+existing one-time boot/WiFi-reconnect pull and explicit manual Pull Settings
+remain available. Receiving inline settings first suppresses that startup GET
+for the connection, including while an inline update is pending local retry.
+The API must implement inclusion of changed settings in events responses; this
+firmware change does not modify a backend.
 
 ---
 

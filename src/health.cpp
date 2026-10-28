@@ -5,6 +5,7 @@
 #include <esp_task_wdt.h>
 #include <WiFi.h>
 #include <cstring>
+#include <utility>
 #include <time.h>
 #include <sys/time.h>
 
@@ -17,6 +18,7 @@
 #include "settings.h"
 #include "main.h"
 #include "networkHandller.h"
+#include "health_performance.h"
 
 // Global metrics
 SystemHealthMetrics g_healthMetrics = {};
@@ -258,6 +260,55 @@ void health_initTaskHealth(TaskHealthMetrics& metrics, const char* taskName, Tas
     metrics.allocatedStackSize = stackSize;
 }
 
+struct EventSettingsSyncState
+{
+    String pendingJson;
+    String lastAppliedJson;
+    bool attempted = false;
+    uint32_t lastAttemptMs = 0;
+};
+
+static bool processEventSettingsUpdates(EventSettingsSyncState &state)
+{
+    String incoming;
+    if (settings_takeEventUpdate(incoming))
+    {
+        if (incoming != state.pendingJson)
+        {
+            state.pendingJson = std::move(incoming);
+            state.attempted = false;
+        }
+    }
+    if (state.pendingJson.length() == 0)
+        return false;
+
+    if (state.pendingJson == state.lastAppliedJson)
+    {
+        state.pendingJson = String();
+        return true;
+    }
+
+    constexpr uint32_t kApplyRetryIntervalMs = 30000;
+    if (state.attempted &&
+        static_cast<uint32_t>(millis() - state.lastAttemptMs) < kApplyRetryIntervalMs)
+        return true;
+
+    state.attempted = true;
+    state.lastAppliedJson = String();
+    esp_task_wdt_reset();
+    const bool applied = settings_applyJsonFromServer(state.pendingJson);
+    esp_task_wdt_reset();
+    state.lastAttemptMs = millis();
+    if (!applied)
+    {
+        return true;
+    }
+
+    state.lastAppliedJson = std::move(state.pendingJson);
+    state.pendingJson = String();
+    return true;
+}
+
 // Maintenance task - simplified for filesystem-based queue
 void maintenanceTask(void *pvParameters)
 {
@@ -279,8 +330,8 @@ void maintenanceTask(void *pvParameters)
 
     // Settings sync state
     static bool nightlySettingsPushedToday = false;
-    static int lastSettingsPushDay = -1;
     static bool settingsPulledAfterOnline = false;
+    EventSettingsSyncState eventSettings;
     
     while (true)
     {
@@ -295,6 +346,8 @@ void maintenanceTask(void *pvParameters)
             system_requestGracefulReboot("cloud_path_60min");
         }
         
+        health_performance_sample();
+
         // Health check (every 30 seconds)
         if (now - lastHealthCheckMs >= kHealthCheckIntervalMs)
         {
@@ -475,6 +528,9 @@ void maintenanceTask(void *pvParameters)
             }
         }
         
+        if (processEventSettingsUpdates(eventSettings))
+            settingsPulledAfterOnline = true;
+
         // Nightly monthly summary update (runs at maintenance hour, e.g., 3 AM)
         static int lastSummaryDay = -1;
         if (timeKeeper().timeIsValid())
@@ -530,7 +586,8 @@ void maintenanceTask(void *pvParameters)
                 }
 
                 // Nightly settings push (once per day)
-                if (!nightlySettingsPushedToday && isWiFiConnected())
+                if (!nightlySettingsPushedToday && isWiFiConnected() && settingsPulledAfterOnline &&
+                    eventSettings.pendingJson.length() == 0 && !settings_hasQueuedEventUpdate())
                 {
                     String maskedJson = settings_getMaskedJsonForServer();
                     esp_task_wdt_reset(); // Feed watchdog before potentially long network operation
@@ -539,7 +596,6 @@ void maintenanceTask(void *pvParameters)
                     if (ok)
                     {
                         nightlySettingsPushedToday = true;
-                        lastSettingsPushDay = currentDay;
                     }
                     else
                     {
@@ -557,7 +613,7 @@ void maintenanceTask(void *pvParameters)
         {
             // Mark as attempted immediately to prevent retries
             settingsPulledAfterOnline = true;
-            
+
             String serverJson;
             esp_task_wdt_reset(); // Feed watchdog before potentially long network operation
             if (network_pullSettingsFromServer(serverJson) && serverJson.length() > 0)

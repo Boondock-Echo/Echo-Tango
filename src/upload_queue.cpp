@@ -28,10 +28,22 @@ static constexpr uint32_t kPendingRenameLockMs = 3000;
 static constexpr int kPendingRenameLockAttempts = 3;
 static constexpr uint32_t kPendingRenameRetryDelayMs = 100;
 
-// Full-tree count of .wav under /pending is expensive; cache briefly for UI/health polling
-static constexpr unsigned long kFsPendingWavCountCacheTtlMs = 2000;
-static std::atomic<unsigned long> g_fsPendingWavCountCacheStampMs{0};
-static size_t g_fsPendingWavCountCachedResult = 0;
+// In-memory pending count. Loaded once at startup, then updated with upload-list changes.
+static std::atomic<size_t> g_pendingUploadCount{0};
+
+static void decrementPendingUploadCount(size_t amount)
+{
+    size_t count = g_pendingUploadCount.load(std::memory_order_relaxed);
+    while (count > 0 &&
+           !g_pendingUploadCount.compare_exchange_weak(count, count > amount ? count - amount : 0,
+                                                       std::memory_order_relaxed))
+    {
+    }
+}
+
+// Startup recovery only; never scan the filesystem from an HTTP status request.
+static void scanPendingCountListLines(const String& dirPath, size_t& count, uint32_t& iterationCount);
+
 static constexpr int kReleaseRetryCount = 3;
 static constexpr uint32_t kReleaseRetryDelayMs = 10;
 
@@ -346,13 +358,7 @@ void uploadQueue_unlockPendingDir() {
     }
 }
 
-void uploadQueue_invalidateFilesystemPendingCountCache()
-{
-    g_fsPendingWavCountCacheStampMs.store(0, std::memory_order_release);
-}
-
 bool uploadQueue_begin() {
-    uploadQueue_invalidateFilesystemPendingCountCache();
     // Only create /pending, /trash, and mutex when SD card is the active storage
     // (no SD card, disabled, init failed, or PSRAM recording mode → skip directory creation)
     if (!isStorageModeSdCard()) {
@@ -378,6 +384,13 @@ bool uploadQueue_begin() {
             return false;
         }
     }
+
+    // Recover the pending count from persistent upload lists once per boot.
+    // Normal additions/removals update the atomic counter without rescanning.
+    size_t pendingCount = 0;
+    uint32_t iterationCount = 0;
+    scanPendingCountListLines(String(kPendingDir), pendingCount, iterationCount);
+    g_pendingUploadCount.store(pendingCount, std::memory_order_release);
     return true;
 }
 
@@ -452,17 +465,6 @@ static bool shouldDeferPendingFilesystemScan()
 static bool shouldDeferTempFileCleanup()
 {
     return recorder_isRecording() || networkHandler_isUploading();
-}
-
-static size_t getCachedFilesystemPendingCountIfValid()
-{
-    const unsigned long now = millis();
-    const unsigned long stamp = g_fsPendingWavCountCacheStampMs.load(std::memory_order_acquire);
-    if (stamp != 0 && (unsigned long)(now - stamp) < kFsPendingWavCountCacheTtlMs)
-    {
-        return g_fsPendingWavCountCachedResult;
-    }
-    return SIZE_MAX;
 }
 
 static void copyBasenameFromFullPath(const char* fullPath, char* out, size_t outLen)
@@ -649,7 +651,7 @@ static bool uploadList_advancePastBasename(const char* dayDir, const char* basen
     std::snprintf(listPath, sizeof(listPath), "%s/%s", dayDir, kUploadListFileName);
     if (!sd_bus::exists(listPath))
     {
-        return true;
+        return false;
     }
 
     const uint32_t startIndex = uploadList_readIndex(dayDir);
@@ -662,9 +664,14 @@ static bool uploadList_advancePastBasename(const char* dayDir, const char* basen
     char line[80];
     uint32_t lineNum = 0;
     uint32_t newIndex = startIndex;
+    size_t removedCount = 0;
     while (readLineFromSd(listFile, line, sizeof(line)))
     {
         trimInPlace(line);
+        if (lineNum >= startIndex && line[0] != '\0')
+        {
+            ++removedCount;
+        }
         if (lineNum >= startIndex && line[0] != '\0' && strcmp(line, basename) == 0)
         {
             newIndex = lineNum + 1;
@@ -674,9 +681,17 @@ static bool uploadList_advancePastBasename(const char* dayDir, const char* basen
     }
     listFile.close();
 
+    if (newIndex == startIndex)
+    {
+        return false;
+    }
     if (newIndex > startIndex)
     {
-        return uploadList_writeIndex(dayDir, newIndex);
+        if (!uploadList_writeIndex(dayDir, newIndex))
+        {
+            return false;
+        }
+        decrementPendingUploadCount(removedCount);
     }
     return true;
 }
@@ -705,6 +720,7 @@ static void uploadList_seedDayFromWavs(const char* dayDir)
     }
 
     bool wrote = false;
+    size_t seededCount = 0;
     while (true)
     {
         sd_bus::SdFile entry = dir.openNextFile();
@@ -725,6 +741,7 @@ static void uploadList_seedDayFromWavs(const char* dayDir)
             if (uploadList_appendBasename(listPath, justName.c_str()))
             {
                 wrote = true;
+                ++seededCount;
             }
         }
     }
@@ -732,8 +749,8 @@ static void uploadList_seedDayFromWavs(const char* dayDir)
     if (wrote)
     {
         uploadList_writeIndex(dayDir, 0);
+        g_pendingUploadCount.fetch_add(seededCount, std::memory_order_relaxed);
         logInfof("[UploadList] Seeded %s from existing .wav files", listPath);
-        uploadQueue_invalidateFilesystemPendingCountCache();
     }
 }
 
@@ -843,12 +860,23 @@ static String pickNextFromDayList(const char* dayDir, const char* skipFullPath)
     char line[80];
     String chosen;
     uint32_t lineNum = 0;
+    size_t skippedCount = 0;
+    bool skippedLiveEntry = false;
     while (readLineFromSd(listFile, line, sizeof(line)))
     {
         const uint32_t thisLine = lineNum++;
         trimInPlace(line);
-        if (thisLine < lineIndex || line[0] == '\0' || !strstr(line, ".wav"))
+        if (thisLine < lineIndex)
         {
+            continue;
+        }
+        if (line[0] == '\0')
+        {
+            continue;
+        }
+        if (!strstr(line, ".wav"))
+        {
+            ++skippedCount;
             continue;
         }
         char fullPath[kMaxUploadPathLength];
@@ -858,16 +886,35 @@ static String pickNextFromDayList(const char* dayDir, const char* skipFullPath)
         }
         if (skipFullPath != nullptr && skipFullPath[0] != '\0' && strcmp(fullPath, skipFullPath) == 0)
         {
+            skippedLiveEntry = true;
+            ++skippedCount;
             continue;
         }
         if (!sd_bus::exists(fullPath))
         {
+            // Never advance the persistent cursor over a valid file excluded by skipFullPath.
+            if (skippedLiveEntry)
+            {
+                ++skippedCount;
+                continue;
+            }
             if (lockPendingDirRenameAttempt())
             {
-                uploadList_writeIndex(dayDir, thisLine + 1);
+                if (uploadList_writeIndex(dayDir, thisLine + 1))
+                {
+                    decrementPendingUploadCount(skippedCount + 1);
+                    lineIndex = thisLine + 1;
+                    skippedCount = 0;
+                }
+                else
+                {
+                    ++skippedCount;
+                }
                 uploadQueue_unlockPendingDir();
-                uploadQueue_invalidateFilesystemPendingCountCache();
-                lineIndex = thisLine + 1;
+            }
+            else
+            {
+                ++skippedCount;
             }
             continue;
         }
@@ -898,12 +945,12 @@ bool uploadList_addPending(const char* fullWavPath)
         return false;
     }
     const bool ok = uploadList_appendBasename(listPath, basename);
-    uploadQueue_unlockPendingDir();
     if (ok)
     {
         logDebugf("[UploadList] Added %s to %s", basename, listPath);
-        uploadQueue_invalidateFilesystemPendingCountCache();
+        g_pendingUploadCount.fetch_add(1, std::memory_order_relaxed);
     }
+    uploadQueue_unlockPendingDir();
     return ok;
 }
 
@@ -930,7 +977,6 @@ bool uploadList_removePending(const char* fullWavPath)
     if (ok)
     {
         logDebugf("[UploadList] Advanced index past %s in %s", basename, dayDir);
-        uploadQueue_invalidateFilesystemPendingCountCache();
     }
     return ok;
 }
@@ -1195,13 +1241,13 @@ bool uploadQueue_markUploaded(const char* path) {
         copyBasenameFromFullPath(path, basename, sizeof(basename));
         char dayDir[40];
         if (basename[0] != '\0' && dayDirFromPendingWavPath(path, dayDir, sizeof(dayDir))) {
-            uploadList_advancePastBasename(dayDir, basename);
+            if (!uploadList_advancePastBasename(dayDir, basename)) {
+                uploadQueue_unlockPendingDir();
+                return false;
+            }
         }
     }
     uploadQueue_unlockPendingDir();
-    if (ok) {
-        uploadQueue_invalidateFilesystemPendingCountCache();
-    }
     return ok;
 }
 
@@ -1219,15 +1265,15 @@ bool uploadQueue_markUploadedWithRecord(const char* path, const UploadIndexRecor
         copyBasenameFromFullPath(path, basename, sizeof(basename));
         char dayDir[40];
         if (basename[0] != '\0' && dayDirFromPendingWavPath(path, dayDir, sizeof(dayDir))) {
-            uploadList_advancePastBasename(dayDir, basename);
+            if (!uploadList_advancePastBasename(dayDir, basename)) {
+                uploadQueue_unlockPendingDir();
+                return false;
+            }
         }
     }
     if (destPath.isEmpty()) {
         const bool gone = !sd_bus::exists(path);
         uploadQueue_unlockPendingDir();
-        if (gone) {
-            uploadQueue_invalidateFilesystemPendingCountCache();
-        }
         return gone;
     }
 
@@ -1235,7 +1281,6 @@ bool uploadQueue_markUploadedWithRecord(const char* path, const UploadIndexRecor
     // holding g_pendingDirMutex here blocked the recorder and caused "Failed to lock /pending directory".
     uploadQueue_unlockPendingDir();
     uploadQueue_appendToIndex(destPath.c_str(), record);
-    uploadQueue_invalidateFilesystemPendingCountCache();
     return true;
 }
 
@@ -1319,26 +1364,7 @@ size_t uploadQueue_getPendingCount() {
     if (!isStorageModeSdCard()) {
         return 0;
     }
-    if (shouldDeferPendingFilesystemScan()) {
-        // Last known count even if the 2 s TTL was invalidated (do not report 0 during upload).
-        return g_fsPendingWavCountCachedResult;
-    }
-    const unsigned long now = millis();
-    const size_t cachedNow = getCachedFilesystemPendingCountIfValid();
-    if (cachedNow != SIZE_MAX) {
-        return cachedNow;
-    }
-    if (!sd_bus::exists(kPendingDir)) {
-        g_fsPendingWavCountCachedResult = 0;
-        g_fsPendingWavCountCacheStampMs.store(now, std::memory_order_release);
-        return 0;
-    }
-    size_t count = 0;
-    uint32_t iterationCount = 0;
-    scanPendingCountListLines(String(kPendingDir), count, iterationCount);
-    g_fsPendingWavCountCachedResult = count;
-    g_fsPendingWavCountCacheStampMs.store(now, std::memory_order_release);
-    return count;
+    return g_pendingUploadCount.load(std::memory_order_acquire);
 }
 
 bool uploadQueue_fileExists(const char* path) {

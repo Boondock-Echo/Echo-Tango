@@ -260,7 +260,10 @@ bool TimeKeeper::syncFromApiResponse(const String &responseBody)
     }
 
     DynamicJsonDocument doc(512);
-    if (deserializeJson(doc, responseBody) != DeserializationError::Ok)
+    StaticJsonDocument<96> filter;
+    filter["timestamp"] = true;
+    filter["current_time"] = true;
+    if (deserializeJson(doc, responseBody, DeserializationOption::Filter(filter)) != DeserializationError::Ok)
     {
         return false;
     }

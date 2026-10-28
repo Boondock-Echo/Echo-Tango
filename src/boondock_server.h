@@ -13,9 +13,6 @@ bool boondock_server_isAPModeActive();
 bool boondock_server_hasClient(); // Check if any client is currently connected
 unsigned long boondock_server_getLastActivityTime(); // Get last client activity timestamp
 
-// WebSocket functions
-void boondock_server_pushHomeData(); // Push home data to all WebSocket clients
-void boondock_server_pushAudioStats(); // Push audio stats to all WebSocket clients
-void boondock_server_pushNetworkConfig(); // Push network config to all WebSocket clients
-void boondock_server_pushLiveAudio(); // Push live audio data to all WebSocket clients
-
+// WebSocket is reserved for audio graph and live audio streaming.
+void boondock_server_pushAudioStats();
+void boondock_server_pushLiveAudio();
