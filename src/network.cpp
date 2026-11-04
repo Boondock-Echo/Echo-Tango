@@ -3388,7 +3388,7 @@ static void runEventSendForEntry(EventQueueEntry &entry)
 					DeserializationError jsonError = deserializeJson(responseDoc, body);
 					if (jsonError == DeserializationError::Ok)
 					{
-						const char *authToken = responseDoc["token"].as<const char *>();
+						const char *authToken = responseDoc["new_token"].as<const char *>();
 						if (authToken != nullptr && authToken[0] != '\0')
 						{
 							if (setApiAuthToken(authToken))
