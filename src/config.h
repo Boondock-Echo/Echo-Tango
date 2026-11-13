@@ -129,6 +129,14 @@
 #define DEFAULT_STARTUP_MODE 1
 #define DEFAULT_OFFLINE_MODE false
 
+// External RTC. TANGO has an MCP7941x on GPIO 21 (SDA) and GPIO 22 (SCL).
+// ECHO has no external RTC; the flag is stored and does not start a chip.
+#if defined(TANGO)
+#define DEFAULT_RTC_ENABLED true
+#else
+#define DEFAULT_RTC_ENABLED false
+#endif
+
 #define DEFAULT_TIMEZONE_OFFSET_HOURS 0  // UTC offset in hours (0 = UTC, -5 = EST, +5 = IST, etc.)
 #define DEFAULT_MAINTENANCE_HOUR 3       // Default maintenance hour (3 AM local time)
 #define DEFAULT_MAINTENANCE_MINUTE 0     // Default maintenance minute (3:00 AM local time)

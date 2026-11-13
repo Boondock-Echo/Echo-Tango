@@ -55,8 +55,6 @@ struct UploadSettings {
 
 struct RtcSettings {
     bool enabled;
-    uint8_t sdaPin;
-    uint8_t sclPin;
 };
 
 struct SdCardSettings {

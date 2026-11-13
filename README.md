@@ -86,8 +86,8 @@ PlatformIO defines two build environments in [`platformio.ini`](platformio.ini):
 
 | Environment | Build define | Intended product                                        | Variant-specific behavior                                                                                                                                                 |
 | ----------- | ------------ | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `TANGO`     | `TANGO`      | [Boondock Tango](https://boondockecho.com/product/tango) | Configurable stereo record-input channel; SD recording is disabled by default until enabled in **Advanced**.                                                              |
-| `ECHO`      | `ECHO`       | [Boondock Echo](https://boondockecho.com/product/echo) | ECHO speaker, LED/keypad, CW, and MQTT integration; SD recording is enabled by default. Enter the device's MQTT key in **Advanced** when MQTT service access is required. |
+| `TANGO`     | `TANGO`      | [Boondock Tango](https://boondockecho.com/product/tango) | No onboard speaker. MCP7941x RTC on GPIO 21 (SDA) and GPIO 22 (SCL) when `rtc.enabled` is true. Configurable stereo record-input channel. SD recording is disabled by default until enabled in **Advanced**. |
+| `ECHO`      | `ECHO`       | [Boondock Echo](https://boondockecho.com/product/echo) | Onboard speaker, LED/keypad, CW, and MQTT. No external RTC (GPIO 21 is the speaker amp, GPIO 22 is the NeoPixel). SD recording is enabled by default. Enter the device's MQTT key in **Advanced** when MQTT service access is required. |
 
 Both environments target `esp32dev`, use the Arduino framework, run the ESP32
 at 160 MHz, expect PSRAM, use the `min_spiffs.csv` partition layout, and build
@@ -385,6 +385,7 @@ networks may require authentication flows the setup form does not provide.
 | [Settings](docs/SETTINGS.md)               | Configuration JSON reference                       |
 | [Cloud API](docs/BOONDOCK_API.md)          | Audio, event, log, firmware, and settings requests |
 | [Serial telemetry](docs/SERIAL_STATUS.md)  | Automated serial message types                     |
+| [MCP7941x RTC](docs/RTC_MCP7941X.md)       | TANGO clock chip; ECHO has no external RTC         |
 | [ECHO feature inventory](ECHO-2024.md)     | Current-versus-legacy feature comparison           |
 
 Some files in `docs/` are engineering analyses, recommendations, or historical

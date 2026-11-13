@@ -576,7 +576,7 @@ See `settings.cpp` (`STATUS` handler) for the authoritative field set.
 | `w` | wifi | array | WiFi credential array (max 3 entries) |
 | `a` | audio | object | Audio settings |
 | `u` | upload | object | Upload settings |
-| `r` | rtc | object | External RTC settings |
+| `r` | rtc | object | External RTC. TANGO: MCP7941x. ECHO: stored only. |
 | `s` | sdCard | object | SD card settings |
 | `t` | timezone | object | Timezone and maintenance settings |
 | `l` | log | object | Logging configuration |
@@ -668,9 +668,7 @@ Four endpoints (`kApiEndpointCount` = 4): **0** Ohio, **1** Oregon, **2** Virgin
 
 | Code | Full Name | Type | Description |
 |------|-----------|------|-------------|
-| `en` | enabled | boolean | Enable external RTC |
-| `sda` | sdaPin | integer | I²C SDA pin number |
-| `scl` | sclPin | integer | I²C SCL pin number |
+| `en` | enabled | boolean | TANGO: probe and use the MCP7941x. ECHO: stored, no chip. `status` field `time.RTC` is true only when TANGO has the chip and this flag is on. |
 
 ---
 

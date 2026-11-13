@@ -34,8 +34,8 @@ typedef uint32_t eps32_i2s_audio_sample_rate_type;
 #  endif
 #endif
 
-// Define LED_BUILTIN
-#if defined(GREEN_LED_GPIO)
+// Define LED_BUILTIN. TANGO sets GREEN_LED_GPIO to -1 so GPIO 22 can be the RTC SCL.
+#if defined(GREEN_LED_GPIO) && (GREEN_LED_GPIO) >= 0
 #  undef LED_BUILTIN
 #  define LED_BUILTIN GREEN_LED_GPIO
 #endif

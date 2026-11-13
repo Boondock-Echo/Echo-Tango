@@ -187,10 +187,9 @@ namespace JsonKeys {
     constexpr const char* CUSTOM_HOST = "ch";
     constexpr const char* CUSTOM_PORT = "cp";
 
-    // RTC fields (ENABLED shared above)
-    constexpr const char* SDA_PIN = "sda";
-    constexpr const char* SCL_PIN = "scl";
-    
+    // RTC uses JsonKeys::ENABLED ("en") only. Pins are fixed on TANGO (SDA 21, SCL 22).
+    // Saved sda/scl keys are ignored. ECHO has no external RTC.
+
     // SD Card fields
     constexpr const char* USE_SD_CARD = "usc";
     constexpr const char* RECORD_TO_SD_CARD = "rsc";
@@ -1279,8 +1278,6 @@ static void appSettingsToJson(DynamicJsonDocument &doc)
     // rtc
     JsonObject rtc = doc.createNestedObject(JsonKeys::RTC);
     rtc[JsonKeys::ENABLED] = appSettings.rtc.enabled;
-    rtc[JsonKeys::SDA_PIN] = appSettings.rtc.sdaPin;
-    rtc[JsonKeys::SCL_PIN] = appSettings.rtc.sclPin;
 
     // sdCard
     JsonObject sdCard = doc.createNestedObject(JsonKeys::SD_CARD);
@@ -2049,28 +2046,7 @@ static bool jsonToAppSettings(const JsonObject &root)
                                  boolToString(appSettings.rtc.enabled),
                                  boolToString(newValue));
                 appSettings.rtc.enabled = newValue;
-            }
-        }
-        if (rtc.containsKey(JsonKeys::SDA_PIN) || rtc.containsKey("sdaPin"))
-        {
-            uint8_t newValue = static_cast<uint8_t>(rtc.containsKey(JsonKeys::SDA_PIN) ? rtc[JsonKeys::SDA_PIN].as<int>() : rtc["sdaPin"].as<int>());
-            if (appSettings.rtc.sdaPin != newValue)
-            {
-                logSettingChange("rtc.sdaPin",
-                                 String(static_cast<unsigned>(appSettings.rtc.sdaPin)),
-                                 String(static_cast<unsigned>(newValue)));
-                appSettings.rtc.sdaPin = newValue;
-            }
-        }
-        if (rtc.containsKey(JsonKeys::SCL_PIN) || rtc.containsKey("sclPin"))
-        {
-            uint8_t newValue = static_cast<uint8_t>(rtc.containsKey(JsonKeys::SCL_PIN) ? rtc[JsonKeys::SCL_PIN].as<int>() : rtc["sclPin"].as<int>());
-            if (appSettings.rtc.sclPin != newValue)
-            {
-                logSettingChange("rtc.sclPin",
-                                 String(static_cast<unsigned>(appSettings.rtc.sclPin)),
-                                 String(static_cast<unsigned>(newValue)));
-                appSettings.rtc.sclPin = newValue;
+                timeKeeper().refreshExternalRtc();
             }
         }
     }
@@ -3718,10 +3694,6 @@ String settings_getParam(const String &param)
 
     if (lowerParam == "rtc.enabled")
         return String(appSettings.rtc.enabled ? "true" : "false");
-    if (lowerParam == "rtc.sdapin")
-        return String(appSettings.rtc.sdaPin);
-    if (lowerParam == "rtc.sclpin")
-        return String(appSettings.rtc.sclPin);
 
     if (lowerParam == "sdcard.usesdcard")
         return String(appSettings.sdCard.useSdCard ? "true" : "false");
@@ -4428,32 +4400,7 @@ bool settings_setParam(const String &param, const String &value)
                          boolToString(appSettings.rtc.enabled),
                          boolToString(newValue));
         appSettings.rtc.enabled = newValue;
-        return settings_save();
-    }
-    if (lowerParam == "rtc.sdapin")
-    {
-        uint8_t newValue = static_cast<uint8_t>(value.toInt());
-        if (appSettings.rtc.sdaPin == newValue)
-        {
-            return true;
-        }
-        logSettingChange("rtc.sdaPin",
-                         String(static_cast<unsigned>(appSettings.rtc.sdaPin)),
-                         String(static_cast<unsigned>(newValue)));
-        appSettings.rtc.sdaPin = newValue;
-        return settings_save();
-    }
-    if (lowerParam == "rtc.sclpin")
-    {
-        uint8_t newValue = static_cast<uint8_t>(value.toInt());
-        if (appSettings.rtc.sclPin == newValue)
-        {
-            return true;
-        }
-        logSettingChange("rtc.sclPin",
-                         String(static_cast<unsigned>(appSettings.rtc.sclPin)),
-                         String(static_cast<unsigned>(newValue)));
-        appSettings.rtc.sclPin = newValue;
+        timeKeeper().refreshExternalRtc();
         return settings_save();
     }
 

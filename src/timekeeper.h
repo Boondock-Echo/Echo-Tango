@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <RTClib.h>
 #include <time.h>
 
 class TimeKeeper
@@ -20,9 +19,13 @@ public:
     bool syncFromEventTimestamp(time_t epochSeconds, long microseconds);
 
     void notifyNetworkConnected();
-    
+
     // Apply timezone from settings (call when timezone setting changes)
     void applyTimezoneFromSettings();
+
+    // TANGO: start or stop the MCP7941x from appSettings.rtc.enabled.
+    // Other builds keep hasRtc() false.
+    void refreshExternalRtc();
     
     // Get boot time tracking for millis-based time calculation
     unsigned long getBootTimeMs() const;
@@ -59,9 +62,7 @@ private:
     bool shouldResyncRtc(time_t targetEpochSeconds);
     void recordBootTime();
 
-    RTC_DS3231 rtc;
     bool rtcAvailable = false;
-    bool wireInitialized = false;
     unsigned long lastPeriodicNtpMs = 0;
     unsigned long lastNtpAttemptMs = 0;
     
@@ -73,7 +74,6 @@ private:
     // Time synchronization monitoring
     TimeSyncMetrics metrics;
     time_t lastSyncEpoch = 0;  // Last successful sync epoch time
-    time_t lastRtcSyncEpoch = 0;  // Last RTC sync epoch time
     
     // Startup time sync tracking
     unsigned long startupBeginMs = 0;  // When startup time sync began

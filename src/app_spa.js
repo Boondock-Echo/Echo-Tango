@@ -162,7 +162,7 @@ const SETTINGS_HELP = {
 
     // System actions
     'adv.reboot': 'Reboot Device restarts the unit without changing any settings or recordings. Use this after firmware updates or configuration changes if the device appears stuck or unresponsive. The device will temporarily go offline during reboot.',
-    'adv.setDefault': 'Set Default restores most configuration values (audio, upload, RTC, SD card, logs) to factory defaults while preserving WiFi credentials. Use this if settings become confusing or unstable. The device will reboot after applying defaults.',
+    'adv.setDefault': 'Set Default restores most configuration values (audio, upload, SD card, logs) to factory defaults while preserving WiFi credentials and the RTC setting. Use this if settings become confusing or unstable. The device will reboot after applying defaults.',
     'adv.factoryReset': 'Factory Reset erases all stored settings, including WiFi and SD configuration, returning the device to a fresh state. Use this only as a last resort or before transferring ownership. The device will reboot into AP setup mode.'
 };
 
@@ -5042,7 +5042,7 @@ async function setDefaultSettings() {
     if (!await showConfirmModal('Set Default will reset all settings to default values, but keep WiFi settings. Continue?', 'Set Default')) {
         return;
     }
-    if (!await showConfirmModal('Are you sure? This will reset all audio, upload, RTC, SD card, and log settings to defaults. WiFi settings will be preserved.', 'Set Default')) {
+    if (!await showConfirmModal('Are you sure? This will reset all audio, upload, SD card, and log settings to defaults. WiFi and RTC settings will be preserved.', 'Set Default')) {
         return;
     }
     try {
