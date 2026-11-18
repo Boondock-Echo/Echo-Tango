@@ -103,7 +103,7 @@
 /** Stored value matches codec stereo slot: 0 = first sample (L in I2S order), 1 = second (R). Web UI swaps Left/Right labels vs these indices. */
 #define DEFAULT_AUDIO_RECORD_INPUT_CHANNEL 1
 #endif
-#define DEFAULT_AUDIO_DISCARD_SMALL_FILES_ENABLED false
+#define DEFAULT_AUDIO_DISCARD_SMALL_FILES_ENABLED true
 #define DEFAULT_AUDIO_DISCARD_SMALL_FILES_MIN_MS 1000
 
 // Speaker defaults (ECHO has onboard speaker; other environments default off unless user enables)
