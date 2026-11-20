@@ -74,7 +74,7 @@ The remaining sections are described below.
   - **Short key**: `r`  
   - **Legacy key**: `rtc`  
   - **Type**: object  
-  - **Description**: Enables and configures the hardware real‑time clock.  
+  - **Description**: TANGO enables the MCP7941x. ECHO stores the flag and has no external RTC.  
   - See [RTC Settings](#rtc-settings) for fields.
 
 - **`s` / `sdCard` – SD card settings**  
@@ -369,19 +369,7 @@ Type: object.
   - **Short key**: `en`  
   - **Legacy key**: `enabled`  
   - **Type**: boolean  
-  - **Description**: If true, the firmware will use and maintain an external RTC.
-
-- **`sda` / `sdaPin`**  
-  - **Short key**: `sda`  
-  - **Legacy key**: `sdaPin`  
-  - **Type**: integer (pin number)  
-  - **Description**: I²C SDA pin for the RTC module.
-
-- **`scl` / `sclPin`**  
-  - **Short key**: `scl`  
-  - **Legacy key**: `sclPin`  
-  - **Type**: integer (pin number)  
-  - **Description**: I²C SCL pin for the RTC module.
+  - **Description**: On TANGO, `true` probes the MCP7941x at `0x6F` (SDA GPIO 21, SCL GPIO 22) and uses it for UTC time. Default is `true` on TANGO and `false` on ECHO. On ECHO the flag is stored and does not start a chip. Saved `sda` / `scl` keys are ignored. A settings file that still has `false` from the earlier default leaves the chip off until this is set `true`. See [RTC_MCP7941X.md](RTC_MCP7941X.md).
 
 ---
 

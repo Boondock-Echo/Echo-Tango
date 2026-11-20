@@ -90,10 +90,8 @@ AppSettings appSettings = []() {
         settings.upload.enabled[i] = (i < 3);  // Ohio, Oregon, Virginia on by default; Custom (slot 3) off
     }
 
-    // Initialize RTC settings (default: disabled, pins 5 and 18)
-    settings.rtc.enabled = false;
-    settings.rtc.sdaPin = 5;
-    settings.rtc.sclPin = 18;
+    // TANGO default is on (MCP7941x). ECHO stores the flag and has no chip.
+    settings.rtc.enabled = DEFAULT_RTC_ENABLED;
 
     // Initialize SD card settings (product-specific defaults — see config.h DEFAULT_SD_*)
     settings.sdCard.useSdCard = DEFAULT_SD_USE_SD_CARD;

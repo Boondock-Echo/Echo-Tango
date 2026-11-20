@@ -103,7 +103,7 @@
 /** Stored value matches codec stereo slot: 0 = first sample (L in I2S order), 1 = second (R). Web UI swaps Left/Right labels vs these indices. */
 #define DEFAULT_AUDIO_RECORD_INPUT_CHANNEL 1
 #endif
-#define DEFAULT_AUDIO_DISCARD_SMALL_FILES_ENABLED false
+#define DEFAULT_AUDIO_DISCARD_SMALL_FILES_ENABLED true
 #define DEFAULT_AUDIO_DISCARD_SMALL_FILES_MIN_MS 1000
 
 // Speaker defaults (ECHO has onboard speaker; other environments default off unless user enables)
@@ -128,6 +128,14 @@
 #define DEFAULT_LED_STYLE 0  // 0 = flashing, 1 = solid
 #define DEFAULT_STARTUP_MODE 1
 #define DEFAULT_OFFLINE_MODE false
+
+// External RTC. TANGO has an MCP7941x on GPIO 21 (SDA) and GPIO 22 (SCL).
+// ECHO has no external RTC; the flag is stored and does not start a chip.
+#if defined(TANGO)
+#define DEFAULT_RTC_ENABLED true
+#else
+#define DEFAULT_RTC_ENABLED false
+#endif
 
 #define DEFAULT_TIMEZONE_OFFSET_HOURS 0  // UTC offset in hours (0 = UTC, -5 = EST, +5 = IST, etc.)
 #define DEFAULT_MAINTENANCE_HOUR 3       // Default maintenance hour (3 AM local time)

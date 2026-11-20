@@ -521,9 +521,7 @@ response body in **Settings Download**.
   },
 
   "r": {
-    "en":  false,
-    "sda": 21,
-    "scl": 22
+    "en":  false
   },
 
   "s": {
@@ -612,9 +610,7 @@ response body in **Settings Download**.
 
 | Key | Full name | Type | Description |
 |-----|-----------|------|-------------|
-| `en` | enabled | bool | Enable hardware RTC |
-| `sda` | sdaPin | int | I2C SDA GPIO pin |
-| `scl` | sclPin | int | I2C SCL GPIO pin |
+| `en` | enabled | bool | TANGO: use the MCP7941x. ECHO: stored, no external RTC. Default `true` on TANGO. |
 
 #### `s` — SD Card
 

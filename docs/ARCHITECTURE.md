@@ -110,11 +110,11 @@ HTTP + WebSocket server for management and live streaming.
 
 Central time synchronization.
 
-- **Sources** – RTC (DS3231), NTP, API response timestamps
-- **Timezone** – Offset and maintenance window (e.g. 3 AM local)
+- **Sources** – On TANGO, the MCP7941x (GPIO 21 SDA, GPIO 22 SCL) when `rtc.enabled` is true, then NTP and API timestamps. NTP and API time are written back to the chip. ECHO has no external RTC. See [RTC_MCP7941X.md](RTC_MCP7941X.md).
+- **Timezone** – Offset and maintenance window (e.g. 3 AM local). The chip stores UTC.
 - **Boot-time** – Tracks `millis()` at boot for time reconstruction when sync is delayed
 
-**Notable APIs:** `timeKeeper().ensureTimeFromNtp()`, `timeKeeper().timeIsValid()`, `timeKeeper().syncFromApiResponse()`.
+**Notable APIs:** `timeKeeper().refreshExternalRtc()`, `timeKeeper().syncFromRtc()`, `timeKeeper().ensureTimeFromNtp()`, `timeKeeper().timeIsValid()`, `timeKeeper().syncFromApiResponse()`.
 
 ---
 
@@ -227,7 +227,7 @@ Microphone → Codec (ES8388) → Recorder
 
 - **Platform** – ESP32 (PlatformIO + Arduino framework)
 - **Board** – `esp32dev` with PSRAM
-- **Libraries** – AudioKit, RTClib, ESPAsyncWebServer, ArduinoJson, SD_MMC
+- **Libraries** – AudioKit, ESPAsyncWebServer, ArduinoJson, SD_MMC. TANGO talks to the MCP7941x with Arduino `Wire` (I2C0). The ES8388 stays on `Wire1`.
 
 ---
 
@@ -243,7 +243,8 @@ Microphone → Codec (ES8388) → Recorder
 | `settings.cpp/h`  | Settings                          |
 | `common.cpp/h`    | Shared utilities                  |
 | `health.cpp/h`    | Health & maintenance              |
-| `timekeeper.cpp/h`| Time sync                         |
+| `timekeeper.cpp/h`| Time sync (NTP, API, TANGO MCP7941x) |
+| `mcp7941x.cpp/h`  | MCP7941x driver (TANGO only)      |
 | `logger.cpp/h`    | Logging                           |
 | `boondock_server.cpp/h` | Web server                 |
 | `live_audio.cpp/h`    | Live streaming buffer        |

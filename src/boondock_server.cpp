@@ -2923,12 +2923,9 @@ static void handleMainAdvancedSetDefault()
         enabled[i] = (i < 3);  // Ohio, Oregon, Virginia on; Custom (slot 3) off
     }
 
-    // Reset RTC settings to defaults
-    JsonObject rtc = doc["r"];
-    rtc["en"] = false;
-    rtc["sda"] = 5;
-    rtc["scl"] = 18;
-    
+    // RTC is left unchanged. The enable flag is a board fact (TANGO on, ECHO off),
+    // not a user setting, and the I2C pins are fixed in firmware.
+
     // Reset SD card settings to product defaults (TANGO: off; ECHO: on)
     JsonObject sdCard = doc["s"];
     sdCard["usc"] = DEFAULT_SD_USE_SD_CARD;

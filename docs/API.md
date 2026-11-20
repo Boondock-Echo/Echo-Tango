@@ -268,9 +268,7 @@ All parameter names are case-insensitive.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `rtc.enabled` | bool | Enable RTC |
-| `rtc.sdaPin` | int | I2C SDA pin |
-| `rtc.sclPin` | int | I2C SCL pin |
+| `rtc.enabled` | bool | TANGO: start the MCP7941x. ECHO: stored, no chip. Default `true` on TANGO. |
 
 ### Other
 

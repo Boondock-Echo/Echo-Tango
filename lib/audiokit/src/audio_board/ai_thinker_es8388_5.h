@@ -62,12 +62,21 @@
 
 #define AUXIN_DETECT_GPIO         12
 #define HEADPHONE_DETECT          39
+// TANGO has no onboard speaker. GPIO 21 and GPIO 22 are the MCP7941x I2C bus
+// (SDA / SCL). Leaving the amp-enable and green-LED numbers in place would
+// drive those pins and break the clock. ECHO keeps the speaker amp on GPIO 21
+// and the NeoPixel on GPIO 22, and does not use an external RTC.
+#if defined(TANGO)
+#define PA_ENABLE_GPIO            -1
+#define GREEN_LED_GPIO            -1
+#else
 #define PA_ENABLE_GPIO            21
+#define GREEN_LED_GPIO            22
+#endif
 #define ADC_DETECT                  -1
 #define ES7243_MCLK                -1
 #define RESET_CODEC                -1
 #define RESET_BOARD                -1
-#define GREEN_LED_GPIO            22
 #define BLUE_LED_GPIO              -1
 
 #define AUDIO_CODEC_DEFAULT_CONFIG(){                   \

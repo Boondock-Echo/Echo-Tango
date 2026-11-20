@@ -2,7 +2,6 @@
 
 #include <ArduinoJson.h>
 #include <WiFi.h>
-#include <Wire.h>
 #include <sys/time.h>
 #include <cstdlib>
 #include <cmath>
@@ -11,6 +10,10 @@
 #include "logger.h"
 #include "main.h"
 #include "recorder.h"
+
+#if defined(TANGO)
+#include "mcp7941x.h"
+#endif
 
 namespace
 {
@@ -34,81 +37,46 @@ void TimeKeeper::begin()
     startupBeginMs = millis();
     startupSyncMode = true;
     lastNtpAttemptMs = 0; // Reset to allow immediate NTP attempt
-    
-    // Only initialize RTC if enabled in settings
-    if (!appSettings.rtc.enabled)
-    {
-        rtcAvailable = false;
-    }
-    else
-    {
-        if (!wireInitialized)
-        {
-            Wire.begin(appSettings.rtc.sdaPin, appSettings.rtc.sclPin);
-            wireInitialized = true;
-            delay(10);
-        }
+    rtcAvailable = false;
 
-        rtcAvailable = rtc.begin();
-        if (!rtcAvailable)
-        {
-        }
-        else if (rtc.lostPower())
-        {
-        }
-        else if (syncFromRtc())
-        {
-            // Update boot time epoch if we got time from RTC
-            time_t nowEpoch = 0;
-            time(&nowEpoch);
-            if (isEpochValid(nowEpoch))
-            {
-                bootTimeEpoch = nowEpoch;
-                startupSyncMode = false; // Got time from RTC, exit startup mode
-            }
-        }
+    // TANGO may already have a valid UTC time in the MCP7941x. NTP still runs
+    // once Wi-Fi is up and writes that time back into the chip.
+    refreshExternalRtc();
+    if (bootTimeEpoch == 0 && timeIsValid())
+    {
+        time(&bootTimeEpoch);
     }
-    
-    // If we still don't have valid time, we'll try NTP aggressively in loop()
 }
 
 void TimeKeeper::loop()
 {
-    // If RTC is enabled and available, try to sync from RTC first
-    if (appSettings.rtc.enabled && rtcAvailable && !timeIsValid())
-    {
-        if (syncFromRtc())
-        {
-            startupSyncMode = false; // Got time from RTC, exit startup mode
-            return;
-        }
-    }
-
-    // Aggressive NTP retry during startup (first 5 minutes or until synced)
-    if (startupSyncMode && !timeIsValid())
+    // Aggressive NTP retry during startup (first 5 minutes or until NTP succeeds).
+    // A TANGO unit that already took time from the MCP7941x stays in this window
+    // so the first network sync can correct the chip, and it does not block the
+    // rest of the loop while the clock is already valid.
+    if (startupSyncMode)
     {
         const unsigned long startupElapsed = millis() - startupBeginMs;
-        if (startupElapsed < kStartupNtpTimeoutMs)
+        if (startupElapsed >= kStartupNtpTimeoutMs)
         {
-            // Try NTP every 5 seconds during startup
-            if (WiFi.isConnected())
+            startupSyncMode = false;
+        }
+        else if (WiFi.isConnected())
+        {
+            const unsigned long nowMs = millis();
+            if ((nowMs - lastNtpAttemptMs) >= kStartupNtpRetryIntervalMs)
             {
-                const unsigned long nowMs = millis();
-                if ((nowMs - lastNtpAttemptMs) >= kStartupNtpRetryIntervalMs)
+                if (syncFromNtp(true))
                 {
-                    if (syncFromNtp(true))
-                    {
-                        startupSyncMode = false; // Got time from NTP, exit startup mode
-                        return;
-                    }
+                    startupSyncMode = false;
+                    return;
                 }
             }
-            return; // Don't do periodic sync during startup mode
         }
-        else
+
+        if (!timeIsValid())
         {
-            // Startup timeout reached, exit startup mode
-            startupSyncMode = false;
+            return;
         }
     }
 
@@ -144,42 +112,41 @@ bool TimeKeeper::timeIsValid() const
 
 bool TimeKeeper::syncFromRtc()
 {
+#if !defined(TANGO)
+    return false;
+#else
     if (!rtcAvailable)
     {
         return false;
     }
 
-    if (rtc.lostPower())
+    time_t chipEpoch = 0;
+    if (!mcp7941x().readUtc(chipEpoch) || !isEpochValid(chipEpoch))
     {
         return false;
     }
 
-    DateTime rtcNow = rtc.now();
-    time_t epochSeconds = rtcNow.unixtime();
-    if (!isEpochValid(epochSeconds))
+    struct timeval before = {};
+    gettimeofday(&before, nullptr);
+    if (isEpochValid(before.tv_sec))
     {
-        return false;
-    }
-
-    // Monitor RTC accuracy if we have a previous sync
-    if (isEpochValid(lastRtcSyncEpoch) && lastRtcSyncEpoch > 0)
-    {
-        double rtcDrift = difftime(epochSeconds, lastRtcSyncEpoch);
-        metrics.rtcTotalDriftSeconds += fabs(rtcDrift);
-        if (fabs(rtcDrift) > metrics.rtcMaxDriftSeconds)
+        const double drift = fabs(difftime(chipEpoch, before.tv_sec));
+        metrics.rtcTotalDriftSeconds += drift;
+        if (drift > metrics.rtcMaxDriftSeconds)
         {
-            metrics.rtcMaxDriftSeconds = fabs(rtcDrift);
+            metrics.rtcMaxDriftSeconds = drift;
         }
     }
 
-    if (!setSystemTime(epochSeconds, 0))
+    if (!setSystemTime(chipEpoch, 0))
     {
         return false;
     }
 
     metrics.rtcSyncCount++;
-    lastRtcSyncEpoch = epochSeconds;
+    logInfof("[Clock] Time set from MCP7941x");
     return true;
+#endif
 }
 
 bool TimeKeeper::ensureTimeFromNtp()
@@ -324,14 +291,14 @@ bool TimeKeeper::syncFromEventTimestamp(time_t epochSeconds, long microseconds)
 void TimeKeeper::notifyNetworkConnected()
 {
     lastNtpAttemptMs = 0; // Reset to allow immediate NTP attempt
-    // If in startup mode and time is invalid, try to sync immediately
-    if (startupSyncMode && !timeIsValid())
+    // Startup still wants NTP when the MCP7941x already provided a valid time,
+    // so the chip can be corrected as soon as the network is up.
+    if (!timeIsValid() || startupSyncMode)
     {
-        syncFromNtp(true);
-    }
-    else if (!timeIsValid())
-    {
-        syncFromNtp(true);
+        if (syncFromNtp(true))
+        {
+            startupSyncMode = false;
+        }
     }
 }
 
@@ -342,21 +309,30 @@ bool TimeKeeper::setSystemAndRtcTime(time_t epochSeconds, long microseconds)
         return false;
     }
 
-    // If boot time epoch wasn't set yet, set it now (first time sync)
-    bool isFirstTimeSync = (bootTimeEpoch == 0 && bootTimeRecorded);
-    if (isFirstTimeSync)
+#if defined(TANGO)
+    if (rtcAvailable)
     {
-        bootTimeEpoch = epochSeconds;
-        
-        // Timestamp recalculation removed - using filesystem-based queue
-        // Files in /pending are uploaded as-is
-    }
+        time_t chipEpoch = 0;
+        if (mcp7941x().readUtc(chipEpoch) && isEpochValid(chipEpoch))
+        {
+            const double drift = fabs(difftime(epochSeconds, chipEpoch));
+            metrics.rtcTotalDriftSeconds += drift;
+            if (drift > metrics.rtcMaxDriftSeconds)
+            {
+                metrics.rtcMaxDriftSeconds = drift;
+            }
+        }
 
-    if (rtcAvailable && shouldResyncRtc(epochSeconds))
-    {
-        DateTime newTime(epochSeconds);
-        rtc.adjust(newTime);
+        if (mcp7941x().writeUtc(epochSeconds))
+        {
+            metrics.rtcSyncCount++;
+        }
+        else
+        {
+            logWarnf("[Clock] MCP7941x time write failed");
+        }
     }
+#endif
 
     return true;
 }
@@ -378,6 +354,13 @@ bool TimeKeeper::setSystemTime(time_t epochSeconds, long microseconds)
     if (settimeofday(&target, nullptr) != 0)
     {
         return false;
+    }
+
+    // First accepted clock is the boot epoch used by millis-based reconstruction.
+    // Timestamp recalculation was removed; files in /pending are uploaded as-is.
+    if (bootTimeEpoch == 0 && bootTimeRecorded)
+    {
+        bootTimeEpoch = epochSeconds;
     }
 
     double deltaSeconds = static_cast<double>(target.tv_sec - before.tv_sec);
@@ -407,14 +390,69 @@ bool TimeKeeper::setSystemTime(time_t epochSeconds, long microseconds)
 
 bool TimeKeeper::shouldResyncRtc(time_t targetEpochSeconds)
 {
+#if !defined(TANGO)
+    (void)targetEpochSeconds;
+    return false;
+#else
     if (!rtcAvailable)
     {
         return false;
     }
 
-    DateTime rtcNow = rtc.now();
-    const long delta = static_cast<long>(targetEpochSeconds - rtcNow.unixtime());
-    return labs(delta) >= kRtcSkewThresholdSeconds;
+    time_t chipEpoch = 0;
+    if (!mcp7941x().readUtc(chipEpoch) || !isEpochValid(chipEpoch))
+    {
+        return true;
+    }
+
+    const long long delta = static_cast<long long>(targetEpochSeconds) - static_cast<long long>(chipEpoch);
+    return llabs(delta) >= kRtcSkewThresholdSeconds;
+#endif
+}
+
+void TimeKeeper::refreshExternalRtc()
+{
+#if !defined(TANGO)
+    rtcAvailable = false;
+#else
+    if (!appSettings.rtc.enabled)
+    {
+        mcp7941x().end();
+        rtcAvailable = false;
+        return;
+    }
+
+    if (!mcp7941x().begin())
+    {
+        rtcAvailable = false;
+        logWarnf("[Clock] MCP7941x not found (SDA %d, SCL %d)", Mcp7941x::kSdaPin, Mcp7941x::kSclPin);
+        return;
+    }
+
+    rtcAvailable = true;
+    logInfof("[Clock] MCP7941x ready (SDA %d, SCL %d)", Mcp7941x::kSdaPin, Mcp7941x::kSclPin);
+
+    if (!timeIsValid())
+    {
+        (void)syncFromRtc();
+        return;
+    }
+
+    time_t nowSeconds = 0;
+    time(&nowSeconds);
+    if (isEpochValid(nowSeconds) && shouldResyncRtc(nowSeconds))
+    {
+        if (mcp7941x().writeUtc(nowSeconds))
+        {
+            metrics.rtcSyncCount++;
+            logInfof("[Clock] MCP7941x updated from system time");
+        }
+        else
+        {
+            logWarnf("[Clock] MCP7941x time write failed");
+        }
+    }
+#endif
 }
 
 void TimeKeeper::recordBootTime()

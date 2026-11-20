@@ -95,7 +95,7 @@ Emitted once at the end of `setup()`.
 | `fw` | Firmware string (`FIRMWARE`) |
 | `ss` | WiFi SSID for slot 0 (or `""`) |
 | `sie` | WiFi static IP enabled (slot 0) |
-| `rte` | RTC enabled |
+| `rte` | RTC enabled setting. On TANGO, `true` starts the MCP7941x. ECHO stores the flag and has no chip. |
 | `usc` | Use SD card |
 | `oh` | Timezone offset hours |
 | `wtp` | WiFi TX power (1–10) |
