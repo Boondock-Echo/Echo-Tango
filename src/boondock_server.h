@@ -6,7 +6,7 @@
 #include <AsyncWebSocket.h>
 
 // Forward declarations
-void boondock_server_startAPMode();
+bool boondock_server_startAPMode(bool recovery = false);
 void boondock_server_startMainMode(); // Start main web server when WiFi is connected
 void boondock_server_loop(); // Call this from network_loop() to handle web server requests
 bool boondock_server_isAPModeActive();

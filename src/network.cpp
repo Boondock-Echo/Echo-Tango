@@ -15,6 +15,7 @@
 #include <cstdlib>
 
 #include "boondock_server.h"
+#include "wifi_enterprise.h"
 #include "common.h"
 #include "config.h"
 #include "logger.h"
@@ -405,20 +406,15 @@ namespace
 	bool connectWiFiClientWithRetry(WiFiClient &client, const char *host, uint16_t port,
 									uint8_t maxRetries = 1, unsigned long connectionTimeoutMs = 3000)
 	{
-		// Set shorter timeout to prevent long blocking calls (1 second max per attempt)
-		client.setTimeout(connectionTimeoutMs);
-
 		for (uint8_t attempt = 0; attempt < maxRetries; ++attempt)
 		{
 			// Feed watchdog before connection attempt
 			esp_task_wdt_reset();
 
 			unsigned long attemptStartMs = millis();
-			// Attempt connection (this will block for up to connectionTimeoutMs)
-			// Note: We can't feed watchdog during the blocking connect() call,
-			// but we set a shorter timeout (1 second) to minimize the blocking duration
+			// The connect overload takes milliseconds. WiFiClient::setTimeout takes seconds.
 			errno = 0;
-			bool connected = client.connect(host, port);
+			bool connected = client.connect(host, port, connectionTimeoutMs);
 			const int savedErrno = errno;
 
 			// Feed watchdog immediately after connection attempt
@@ -633,9 +629,9 @@ namespace
 	bool cloudPathSecondaryWanProbeOk()
 	{
 		WiFiClient c;
-		c.setTimeout(CLOUD_PATH_SECONDARY_PROBE_TIMEOUT_MS);
 		esp_task_wdt_reset();
-		const bool ok = c.connect(CLOUD_PATH_SECONDARY_PROBE_HOST, CLOUD_PATH_SECONDARY_PROBE_PORT);
+		const bool ok = c.connect(CLOUD_PATH_SECONDARY_PROBE_HOST, CLOUD_PATH_SECONDARY_PROBE_PORT,
+								  CLOUD_PATH_SECONDARY_PROBE_TIMEOUT_MS);
 		esp_task_wdt_reset();
 		if (ok)
 		{
@@ -835,6 +831,8 @@ bool network_getRandomHealthyEndpoint(size_t &indexOut, const char *&hostOut, ui
 
 bool network_hasAnyWiFiCredentials()
 {
+	if (enterpriseWiFiConfigured())
+		return true;
 	for (size_t idx = 0; idx < kMaxWifiCredentials; ++idx)
 	{
 		const char *ssid_c = appSettings.wifi[idx].ssid;
@@ -869,7 +867,7 @@ void network_begin()
 	{
 		logWarnf("[WiFi] Failed to set DHCP hostname to %s", hostname.c_str());
 	}
-	WiFi.onEvent(handleWiFiEvent);
+	network_reinitializeWiFi();
 
 	// Initialize event queue and task if not already initialized
 	if (eventQueue == nullptr)
@@ -894,6 +892,9 @@ void network_begin()
 	// This function is only called when credentials exist
 	connectToWiFi();
 }
+
+static bool connectToWiFiInternal(bool forceReconnect);
+static bool startRecoveryAP();
 
 void network_loop()
 {
@@ -1076,26 +1077,23 @@ void network_loop()
 	// Web server is now handled in its own dedicated task (webServerTask)
 	// No need to call boondock_server_loop() here anymore
 
-	// Check if we need to start AP mode (no credentials and AP not active)
-	if (!network_hasAnyWiFiCredentials() && !boondock_server_isAPModeActive())
+	if (boondock_server_isAPModeActive())
+	{
+		firstConnectedInElseMs = 0;
+		return;
+	}
+
+	if (!network_hasAnyWiFiCredentials())
 	{
 		logInfof("[Network] No WiFi credentials - starting Access Point mode");
 		boondock_server_startAPMode();
 		return;
 	}
 
-	// Ensure WiFi is in station mode only when credentials are configured
-	// This prevents mixed mode (AP+STA) after credentials are set
-	// Only check when NOT connected to avoid disrupting active connections
-	if (network_hasAnyWiFiCredentials() && !WiFi.isConnected() && WiFi.getMode() != WIFI_STA)
-	{
-		WiFi.mode(WIFI_STA);
-		network_reinitializeWiFi();
-	}
-
 	// Enhanced WiFi auto-recovery with exponential backoff
 	static unsigned long lastWiFiReconnectAttemptMs = 0;
 	static uint32_t wifiReconnectAttemptCount = 0;
+	constexpr uint32_t kRecoveryAPFailureCount = 3;
 	constexpr unsigned long kMinWiFiReconnectIntervalMs = 5000;	  // Minimum 5 seconds between attempts
 	constexpr unsigned long kMaxWiFiReconnectIntervalMs = 300000; // Max 5 minutes between attempts
 	constexpr uint32_t kMaxWiFiReconnectAttempts = 20;			  // Max attempts before giving up for a while
@@ -1103,13 +1101,6 @@ void network_loop()
 	if (!WiFi.isConnected())
 	{
 		firstConnectedInElseMs = 0; // Reset so next connect we wait before first heartbeat
-		// Check if we have WiFi credentials configured
-		if (!network_hasAnyWiFiCredentials())
-		{
-			// No credentials configured - AP mode should be active (handled by boondock_server)
-			return;
-		}
-
 		if (wifiEverConnected && !wifiDisconnectLogged)
 		{
 			logEventf("[WiFi] ✗ Connection lost, attempting reconnect\n");
@@ -1138,9 +1129,16 @@ void network_loop()
 				logDebugf("[WiFi] Reconnection attempt %u/%u (backoff: %lums)",
 						  wifiReconnectAttemptCount + 1, kMaxWiFiReconnectAttempts, reconnectInterval);
 				lastWiFiReconnectAttemptMs = now;
-				wifiReconnectAttemptCount++;
-				connectToWiFi();
-				logDebugf("[WiFi] Reconnection attempt completed (status: %d)", WiFi.status());
+				if (connectToWiFiInternal(false))
+				{
+					++wifiReconnectAttemptCount;
+					logDebugf("[WiFi] Reconnection attempt completed (status: %d)", WiFi.status());
+					if (wifiReconnectAttemptCount >= kRecoveryAPFailureCount && startRecoveryAP())
+					{
+						wifiReconnectAttemptCount = 0;
+						lastWiFiReconnectAttemptMs = 0;
+					}
+				}
 			}
 			else
 			{
@@ -1313,7 +1311,6 @@ static void dropUploadClient(WiFiClient *client)
 		return;
 	}
 	esp_task_wdt_reset();
-	client->setTimeout(250);
 	client->stop();
 	esp_task_wdt_reset();
 }
@@ -2908,70 +2905,122 @@ bool network_areAllEndpointsDead()
 
 namespace
 {
-// Serialize station connect attempts: concurrent WiFi.begin from e.g. UploadTask and network_loop()
-// triggers ESP-IDF "wifi:sta is connecting, return error" and can confuse the STA state machine.
+SemaphoreHandle_t stationMutex()
+{
+	static const SemaphoreHandle_t mutex = xSemaphoreCreateMutex();
+	return mutex;
+}
+
+// An in-progress attempt owns the station. A second task must stay responsive
+// while the owner walks the saved profiles, which can take several watchdog periods.
 struct ConnectToWiFiMutexGuard
 {
 	SemaphoreHandle_t mux;
-	bool took = false;
+	bool took;
 
-	explicit ConnectToWiFiMutexGuard(SemaphoreHandle_t m) : mux(m)
+	explicit ConnectToWiFiMutexGuard(SemaphoreHandle_t mutex)
+		: mux(mutex), took(xSemaphoreTake(mutex, 0) == pdTRUE)
 	{
-		if (mux != nullptr)
-		{
-			took = (xSemaphoreTake(mux, portMAX_DELAY) == pdTRUE);
-		}
 	}
 
 	~ConnectToWiFiMutexGuard()
 	{
-		if (took && mux != nullptr)
-		{
+		if (took)
 			xSemaphoreGive(mux);
-		}
 	}
 };
 } // namespace
 
-void connectToWiFi()
+static bool startRecoveryAP()
 {
-	static SemaphoreHandle_t connectMux = nullptr;
-	if (connectMux == nullptr)
+	const auto mutex = stationMutex();
+	if (!mutex)
+		return false;
+
+	ConnectToWiFiMutexGuard lock(mutex);
+	if (!lock.took || WiFi.isConnected())
+		return false;
+
+	if (!enterpriseWiFiStop())
 	{
-		connectMux = xSemaphoreCreateMutex();
+		logWarnf("[WiFi] Could not clear Enterprise state for the recovery Access Point");
+		return false;
 	}
+
+	logWarnf("[WiFi] Saved networks unavailable; opening the WiFi recovery Access Point");
+	return boondock_server_startAPMode(true);
+}
+
+static bool connectToWiFiInternal(bool forceReconnect)
+{
+	const auto connectMux = stationMutex();
 	if (connectMux == nullptr)
 	{
 		logErrorf("[WiFi] connectToWiFi: mutex create failed");
-		return;
+		return false;
 	}
 	ConnectToWiFiMutexGuard lock(connectMux);
-
-	if (WiFi.isConnected())
+	if (!lock.took)
 	{
-		return;
+		if (forceReconnect)
+			logDebugf("[WiFi] Reconnect deferred while another connection attempt is active");
+		return false;
+	}
+
+	if (boondock_server_isAPModeActive() || (!forceReconnect && WiFi.isConnected()))
+	{
+		return false;
+	}
+
+	const bool supervised = esp_task_wdt_status(nullptr) == ESP_OK;
+	if (supervised)
+		esp_task_wdt_reset();
+
+	if (forceReconnect)
+	{
+		WiFi.disconnect();
+		if (!enterpriseWiFiStop())
+		{
+			logErrorf("[WiFi] Could not clear Enterprise WiFi state before reconnecting");
+			return true;
+		}
+		WiFi.disconnect(true, true);
+		delay(500);
+		WiFi.mode(WIFI_OFF);
+		delay(500);
+		WiFi.mode(WIFI_STA);
+		delay(500);
 	}
 
 	// Ensure WiFi is in station mode only (not AP or mixed mode)
 	// This prevents mixed mode when credentials are configured
 	WiFi.mode(WIFI_STA);
+	network_reinitializeWiFi();
 
-	for (size_t idx = 0; idx < kMaxWifiCredentials; ++idx)
+	EnterpriseWiFiProfile enterprise;
+	const bool hasEnterprise = enterpriseWiFiLoad(enterprise);
+	if (!hasEnterprise && enterpriseWiFiConfigured())
+		logWarnf("[WiFi] Could not load the saved Enterprise profile");
+
+	const int firstProfile = hasEnterprise ? -1 : 0;
+	for (int idx = firstProfile; idx < static_cast<int>(kMaxWifiCredentials); ++idx)
 	{
-		const char *ssid_c = appSettings.wifi[idx].ssid;
-		const char *pass_c = appSettings.wifi[idx].password;
-		const unsigned long timeoutMs = appSettings.wifi[idx].connectTimeoutMs;
-
-		if (ssid_c == nullptr)
+		const bool useEnterprise = idx < 0;
+		const String ssid = useEnterprise ? enterprise.ssid : String(appSettings.wifi[idx].ssid);
+		if (!useEnterprise && hasEnterprise && ssid == enterprise.ssid)
+			continue;  // Keep the configured Enterprise SSID on 802.1X.
+		if (!enterpriseWiFiStop())
 		{
-			continue;
+			logErrorf("[WiFi] Could not clear Enterprise WiFi state");
+			return true;
 		}
+		if (ssid.isEmpty())
+			continue;
 
-		String ssid = String(ssid_c);
-		if (ssid.length() == 0)
-		{
-			continue;
-		}
+		const unsigned long timeoutMs = useEnterprise ? 20000UL : appSettings.wifi[idx].connectTimeoutMs;
+		const char *ssid_c = ssid.c_str();
+		if (supervised)
+			esp_task_wdt_reset();
 
 		// Apply WiFi TX power setting before connection attempt
 		uint8_t esp32TxPower = mapWifiTxPowerLevel(appSettings.wifiTxPower);
@@ -2980,15 +3029,29 @@ void connectToWiFi()
 		logDebugf("[WiFi] Attempting connection to SSID: %s (timeout: %lums)",
 				  ssid_c, timeoutMs);
 
-		WiFi.begin(ssid_c, pass_c);
+		if (useEnterprise)
+		{
+			if (const char *error = enterpriseWiFiStart(enterprise))
+			{
+				logWarnf("[WiFi] %s", error);
+				continue;
+			}
+		}
+		else
+		{
+			WiFi.begin(ssid_c, appSettings.wifi[idx].password);
+		}
 
 		const unsigned long start = millis();
 		unsigned long lastWdtFeedMs = start;
 		constexpr unsigned long kWdtFeedIntervalMs = 10000UL;
-		while (WiFi.status() != WL_CONNECTED && (millis() - start) < timeoutMs)
+		const auto connectedToProfile = [&ssid]() {
+			return WiFi.status() == WL_CONNECTED && WiFi.SSID() == ssid;
+		};
+		while (!connectedToProfile() && (millis() - start) < timeoutMs)
 		{
 			const unsigned long now = millis();
-			if ((now - lastWdtFeedMs) >= kWdtFeedIntervalMs)
+			if (supervised && (now - lastWdtFeedMs) >= kWdtFeedIntervalMs)
 			{
 				esp_task_wdt_reset();
 				lastWdtFeedMs = now;
@@ -2996,7 +3059,10 @@ void connectToWiFi()
 			delay(500);
 		}
 
-		if (WiFi.status() == WL_CONNECTED)
+		if (supervised)
+			esp_task_wdt_reset();
+
+		if (connectedToProfile())
 		{
 			logDebugf("[WiFi] Successfully connected to SSID: %s (took %lums)",
 					  ssid_c, millis() - start);
@@ -3017,52 +3083,56 @@ void connectToWiFi()
 			// Network reconnect tracking is handled in main.cpp maintenance task
 			// Connection success message is logged by WiFi event handler (ARDUINO_EVENT_WIFI_STA_GOT_IP)
 
-			return;
-		}
-		else
-		{
-			logDebugf("[WiFi] Connection to SSID: %s failed (status: %d, elapsed: %lums)",
-					  ssid_c, WiFi.status(), millis() - start);
+			return true;
 		}
 
+		logDebugf("[WiFi] Connection to SSID: %s failed (status: %d, elapsed: %lums)",
+				  ssid_c, WiFi.status(), millis() - start);
+
+		if (useEnterprise)
+		{
+			WiFi.disconnect();
+			if (!enterpriseWiFiStop())
+			{
+				logErrorf("[WiFi] Could not clear Enterprise WiFi after a failed connection");
+				return true;
+			}
+		}
 		WiFi.disconnect(true, true);
 	}
 
 	logErrorf("[WiFi] Connection failed - no credentials succeeded");
+	return true;
+}
+
+void connectToWiFi()
+{
+	connectToWiFiInternal(false);
 }
 
 void network_reinitializeWiFi()
 {
-	// Re-register WiFi event handler (needed after WiFi.mode changes)
-	WiFi.onEvent(handleWiFiEvent);
+	// Arduino retains callbacks across WiFi mode changes.
+	static const auto eventId = WiFi.onEvent(handleWiFiEvent);
+	(void)eventId;
 }
 
 void network_reconnectWiFi()
 {
+	if (boondock_server_isAPModeActive())
+		return;
+
 	if (networkHandler_isUploading())
 	{
 		logWarnf("[Network] WiFi reconnect deferred (upload in progress)\n");
 		return;
 	}
 
-	// Disconnect WiFi
-	WiFi.disconnect(true, true);
-	delay(500);
+	if (!connectToWiFiInternal(true))
+		return;
 
-	// Stop WiFi
-	WiFi.mode(WIFI_OFF);
-	delay(500);
-
-	// Start WiFi again
-	WiFi.mode(WIFI_STA);
-	// Re-register WiFi event handler
-	network_reinitializeWiFi();
-	delay(500);
-
-	esp_task_wdt_reset();
-	// Connect to WiFi
-	connectToWiFi();
-	esp_task_wdt_reset();
+	if (esp_task_wdt_status(nullptr) == ESP_OK)
+		esp_task_wdt_reset();
 
 	// Wait a bit for connection to stabilize
 	delay(1000);
