@@ -56,6 +56,17 @@ static const char htmlContent[] PROGMEM = R"(
                         <input type="password" id="wifi-password" class="form-control" placeholder="Enter WiFi password">
                         <small>Leave blank for open networks</small>
                     </div>
+                    <div id="wifi-enterprise-option" class="form-group" hidden>
+                        <label><input type="checkbox" id="wifi-enterprise"> WPA2-Enterprise (PEAP)</label>
+                        <div id="wifi-enterprise-fields" hidden>
+                            <label for="wifi-enterprise-username">Username</label>
+                            <input id="wifi-enterprise-username" class="form-control" maxlength="128" autocomplete="username">
+                            <label for="wifi-enterprise-identity">Outer identity (optional)</label>
+                            <input id="wifi-enterprise-identity" class="form-control" maxlength="128">
+                            <label for="wifi-enterprise-ca">Trusted CA certificate (PEM)</label>
+                            <textarea id="wifi-enterprise-ca" class="form-control" maxlength="4096" rows="4" spellcheck="false"></textarea>
+                        </div>
+                    </div>
                     <div class="form-actions">
                         <button id="next-btn-1" class="btn-primary">Next</button>
                     </div>

@@ -28,6 +28,7 @@
 #include "web_css.h"
 #include "web_ap_css.h"
 #include "web_js.h"
+#include "wifi_enterprise.h"
 #include "web_spa_html.h"
 #include "app_js_spa_gz.h"
 #include "system_assets.h"
@@ -39,10 +40,14 @@ namespace
 {
     // AP Mode Web Server
     WebServer* apWebServer = nullptr;
-    bool apModeActive = false;
+    std::atomic<bool> apModeActive{false};
+    bool recoveryAP = false;
+    unsigned long recoveryAPIdleSince = 0;
+    constexpr unsigned long kRecoveryAPIdleTimeoutMs = 3UL * 60 * 1000;
     String testConnectionSsid;
     String testConnectionPassword;
-    bool testConnectionInProgress = false;
+    std::atomic<bool> testConnectionInProgress{false};
+    EnterpriseWiFiProfile testEnterpriseProfile;
     bool testConnectionResult = false;
     String testConnectionMessage;
     String testConnectionIp;  // Store IP address after successful test connection
@@ -76,18 +81,12 @@ namespace
     bool connectWiFiClientWithRetry(WiFiClient &client, const char *host, uint16_t port, 
                                      uint8_t maxRetries = 2, unsigned long connectionTimeoutMs = 2000)
     {
-        // Set shorter timeout to prevent long blocking calls
-        client.setTimeout(connectionTimeoutMs);
-        
         for (uint8_t attempt = 0; attempt < maxRetries; ++attempt)
         {
             // Feed watchdog before connection attempt
             esp_task_wdt_reset();
             
-            // Attempt connection (this will block for up to connectionTimeoutMs)
-            // Note: We can't feed watchdog during the blocking connect() call,
-            // but we set a shorter timeout to minimize the blocking duration
-            bool connected = client.connect(host, port);
+            const bool connected = client.connect(host, port, connectionTimeoutMs);
             
             // Feed watchdog after connection attempt
             esp_task_wdt_reset();
@@ -509,6 +508,7 @@ static void handleAPDeviceInfo()
     
     // Get IP address if connected (in mixed mode after test connection)
     // First check if we have a stored IP from successful test connection
+    doc["enterpriseWiFi"] = true;
     if (testConnectionIp.length() > 0)
     {
         doc["ip"] = testConnectionIp;
@@ -564,7 +564,7 @@ static void handleAPWiFiTest()
         return;
     }
     
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(kEnterpriseWiFiJsonCapacity);
     DeserializationError error = deserializeJson(doc, apWebServer->arg("plain"));
     
     if (error)
@@ -582,15 +582,31 @@ static void handleAPWiFiTest()
         return;
     }
     
+    if (testConnectionInProgress)
+    {
+        apWebServer->send(409, "application/json", "{\"success\":false,\"message\":\"A WiFi test is already running\"}");
+        return;
+    }
+
+    testEnterpriseProfile = EnterpriseWiFiProfile{};
+    if (doc["enterprise"] | false)
+    {
+        if (const char *error = enterpriseWiFiParse(doc.as<JsonObjectConst>(), testEnterpriseProfile))
+        {
+            apiError(apWebServer, 400, API_ERR_INVALID_VALUE, error);
+            return;
+        }
+    }
+
     // Store test credentials
     testConnectionSsid = ssid;
-    testConnectionPassword = password;
+    testConnectionPassword = testEnterpriseProfile.ssid.isEmpty() ? password : "";
     testConnectionInProgress = true;
     testConnectionResult = false;
     testConnectionMessage = "";
     
     // Create task to test connection in mixed mode (AP + STA)
-    xTaskCreatePinnedToCore(
+    if (xTaskCreatePinnedToCore(
         testWiFiConnectionTask,
         "WiFiTest",
         4096,
@@ -598,17 +614,30 @@ static void handleAPWiFiTest()
         1,
         nullptr,
         1
-    );
-    
+    ) != pdPASS)
+    {
+        testConnectionInProgress = false;
+        testEnterpriseProfile = EnterpriseWiFiProfile{};
+        testConnectionPassword = "";
+        apiError(apWebServer, 500, API_ERR_INTERNAL, "Could not start the WiFi test task.");
+        return;
+    }
+
     // Wait for test to complete (with timeout)
     unsigned long startTime = millis();
-    constexpr unsigned long timeoutMs = 15000; // 15 second timeout
+    constexpr unsigned long timeoutMs = 25000;
     
     while (testConnectionInProgress && (millis() - startTime) < timeoutMs)
     {
         delay(100);
     }
     
+    if (testConnectionInProgress)
+    {
+        apiError(apWebServer, 504, API_ERR_INTERNAL, "The WiFi test timed out.");
+        return;
+    }
+
     DynamicJsonDocument responseDoc(256);
     responseDoc["success"] = testConnectionResult;
     responseDoc["message"] = testConnectionMessage;
@@ -623,19 +652,39 @@ static void testWiFiConnectionTask(void* pvParameters)
     // Switch to mixed mode (AP + STA)
     WiFi.mode(WIFI_AP_STA);
     
-    // Try to connect to the test network
-    WiFi.begin(testConnectionSsid.c_str(), testConnectionPassword.length() > 0 ? testConnectionPassword.c_str() : nullptr);
-    
-    // Wait for connection (max 10 seconds)
-    unsigned long startTime = millis();
-    constexpr unsigned long timeoutMs = 10000;
-    
-    while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < timeoutMs)
+    // A previous successful test can still have a live station connection.
+    WiFi.disconnect();
+    const unsigned long disconnectStart = millis();
+    while (WiFi.status() == WL_CONNECTED && millis() - disconnectStart < 1000)
+        delay(25);
+
+    const char *error = WiFi.status() == WL_CONNECTED ?
+        "Could not disconnect the previous WiFi test." : nullptr;
+    unsigned long timeoutMs = 10000;
+    const bool useEnterprise = !testEnterpriseProfile.ssid.isEmpty();
+    if (!error && !enterpriseWiFiStop())
+        error = "Could not reset Enterprise WiFi authentication.";
+    if (!error && useEnterprise)
     {
-        delay(500);
+        timeoutMs = 20000;
+        error = enterpriseWiFiStart(testEnterpriseProfile);
     }
-    
-    if (WiFi.status() == WL_CONNECTED)
+    else
+    if (!error)
+    {
+        if (WiFi.begin(testConnectionSsid.c_str(), testConnectionPassword.length() > 0 ?
+                       testConnectionPassword.c_str() : nullptr) == WL_CONNECT_FAILED)
+            error = "Could not start the WiFi test.";
+    }
+
+    const unsigned long startTime = millis();
+    while (!error && (WiFi.status() != WL_CONNECTED || WiFi.SSID() != testConnectionSsid) &&
+           millis() - startTime < timeoutMs)
+    {
+        delay(100);
+    }
+
+    if (!error && WiFi.status() == WL_CONNECTED && WiFi.SSID() == testConnectionSsid)
     {
         testConnectionResult = true;
         testConnectionMessage = "Connection successful";
@@ -646,13 +695,18 @@ static void testWiFiConnectionTask(void* pvParameters)
     else
     {
         testConnectionResult = false;
-        testConnectionMessage = "Connection failed - check SSID and password";
+        testConnectionMessage = error ? error : "Connection failed. Check your WiFi settings.";
+        if (useEnterprise && !error)
+            testConnectionMessage = "Enterprise connection failed. Check the credentials and trusted CA, and ask IT to review the RADIUS logs.";
         testConnectionIp = "";  // Clear IP on failure
         WiFi.disconnect();
+        enterpriseWiFiStop();
         // Switch back to AP mode only on failure
         WiFi.mode(WIFI_AP);
     }
     
+    testEnterpriseProfile = EnterpriseWiFiProfile{};
+    testConnectionPassword = "";
     testConnectionInProgress = false;
     vTaskDelete(nullptr);
 }
@@ -686,7 +740,7 @@ static void handleAPWiFiSave()
         return;
     }
     
-    DynamicJsonDocument doc(512);
+    DynamicJsonDocument doc(kEnterpriseWiFiJsonCapacity);
     DeserializationError error = deserializeJson(doc, apWebServer->arg("plain"));
     
     if (error)
@@ -695,60 +749,83 @@ static void handleAPWiFiSave()
         return;
     }
     
-    String ssid = doc["ssid"] | "";
-    String password = doc["password"] | "";
-    
-    if (ssid.length() == 0)
+    if (doc["enterprise"] | false)
     {
-        apWebServer->send(400, "application/json", "{\"success\":false,\"message\":\"SSID is required\"}");
-        return;
-    }
-    
-    // Clear debounce to ensure immediate save
-    settings_clearDebounce();
-    
-    // Save WiFi credentials to first slot using settings_setParam
-    if (!settings_setParam("wifi[0].ssid", ssid.c_str()))
-    {
-        apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to set SSID\"}");
-        return;
-    }
-    
-    if (password.length() > 0)
-    {
-        if (!settings_setParam("wifi[0].password", password.c_str()))
+        EnterpriseWiFiProfile profile;
+        if (const char *error = enterpriseWiFiParse(doc.as<JsonObjectConst>(), profile))
         {
-            apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to set password\"}");
+            apiError(apWebServer, 400, API_ERR_INVALID_VALUE, error);
+            return;
+        }
+        if (!enterpriseWiFiSave(profile))
+        {
+            apiError(apWebServer, 500, API_ERR_INTERNAL, "Could not save the Enterprise WiFi profile.");
             return;
         }
     }
     else
     {
-        // Clear password for open networks
-        if (!settings_setParam("wifi[0].password", ""))
+        String ssid = doc["ssid"] | "";
+        String password = doc["password"] | "";
+
+        if (ssid.length() == 0)
         {
-            apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to clear password\"}");
+            apWebServer->send(400, "application/json", "{\"success\":false,\"message\":\"SSID is required\"}");
+            return;
+        }
+
+        // Clear debounce to ensure immediate save
+        settings_clearDebounce();
+
+        // Save WiFi credentials to first slot using settings_setParam
+        if (!settings_setParam("wifi[0].ssid", ssid.c_str()))
+        {
+            apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to set SSID\"}");
+            return;
+        }
+
+        if (password.length() > 0)
+        {
+            if (!settings_setParam("wifi[0].password", password.c_str()))
+            {
+                apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to set password\"}");
+                return;
+            }
+        }
+        else
+        {
+            // Clear password for open networks
+            if (!settings_setParam("wifi[0].password", ""))
+            {
+                apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to clear password\"}");
+                return;
+            }
+        }
+
+        // Force an additional save to ensure persistence (settings_setParam may have debounce)
+        settings_clearDebounce();
+        if (!settings_save())
+        {
+            apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to save settings to NVS\"}");
+            return;
+        }
+
+        // Verify the settings were actually saved by checking in-memory structure
+        const char* savedSsid = appSettings.wifi[0].ssid;
+        if (savedSsid == nullptr || strcmp(savedSsid, ssid.c_str()) != 0)
+        {
+            logErrorf("[AP] WARNING: SSID verification failed after save");
+            apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Settings verification failed\"}");
+            return;
+        }
+        // A personal network chosen in the recovery portal replaces the preferred profile.
+        if (enterpriseWiFiConfigured() && !enterpriseWiFiClear())
+        {
+            apiError(apWebServer, 500, API_ERR_INTERNAL, "Could not remove the previous Enterprise WiFi profile.");
             return;
         }
     }
-    
-    // Force an additional save to ensure persistence (settings_setParam may have debounce)
-    settings_clearDebounce();
-    if (!settings_save())
-    {
-        apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Failed to save settings to NVS\"}");
-        return;
-    }
-    
-    // Verify the settings were actually saved by checking in-memory structure
-    const char* savedSsid = appSettings.wifi[0].ssid;
-    if (savedSsid == nullptr || strcmp(savedSsid, ssid.c_str()) != 0)
-    {
-        logErrorf("[AP] WARNING: SSID verification failed after save");
-        apWebServer->send(500, "application/json", "{\"success\":false,\"message\":\"Settings verification failed\"}");
-        return;
-    }
-    
+
     DynamicJsonDocument responseDoc(128);
     responseDoc["success"] = true;
     responseDoc["message"] = "WiFi credentials saved successfully";
@@ -774,7 +851,8 @@ static void setupAPWebServer()
         delete apWebServer;
     }
     
-    apWebServer = new WebServer(80);
+    // The setup test can also bring up STA. Keep the portal on the AP address.
+    apWebServer = new WebServer(WiFi.softAPIP(), 80);
     
     // Root page
     apWebServer->on("/", HTTP_GET, []() { handleAPRoot(); });
@@ -810,67 +888,86 @@ static void setupAPWebServer()
     apWebServer->begin();
 }
 
-void boondock_server_startAPMode()
+bool boondock_server_startAPMode(bool recovery)
 {
     if (apModeActive)
+        return true;
+
+    // Stop the station first. Saved Boondock profiles are kept in application NVS.
+    WiFi.disconnect(true, true);
+    if (!WiFi.mode(WIFI_AP))
     {
-        return; // Already in AP mode
+        logErrorf("[AP] Could not enable Access Point mode");
+        return false;
     }
-    
-    String apSSID = getAPSSID();
+    network_reinitializeWiFi();
+
+    const String &deviceId = getDeviceId();
+    const String apSSID = getAPSSID();
     const char* apPassword = "boondockecho";
 
-    // Disconnect any existing WiFi connection
-    WiFi.disconnect(true, true);
-    delay(100);
-    
-    // Set WiFi mode to AP mode explicitly before starting AP
-    WiFi.mode(WIFI_AP);
-    delay(100);
-    
-    // Ensure WiFi event handler is registered (needed for AP station connection events)
-    network_reinitializeWiFi();
-    
-    // Start AP mode
     if (!WiFi.softAP(apSSID.c_str(), apPassword))
     {
-        // Check if we have WiFi credentials - if not, this is fatal
-        if (!network_hasAnyWiFiCredentials())
-        {
+        WiFi.mode(WIFI_OFF);
+        if (!recovery)
             logFatalf("[Startup] Failed to start Access Point - device unreachable (no WiFi credentials)");
-        }
         else
-        {
-            logErrorf("[AP] Failed to start Access Point");
-        }
-        return;
+            logErrorf("[AP] Failed to start WiFi recovery Access Point");
+        return false;
     }
-    
-    apModeActive = true;
 
-    IPAddress apIP = WiFi.softAPIP();
-    const String &deviceId = getDeviceId();
-
-    Serial.println("");
-    Serial.println("========================================");
-
-    Serial.printf("  BOONDOCK %s\n", PRODUCT_AP_ENV_LABEL);
-    Serial.printf("  FIRMWARE        : %s\n", FIRMWARE);
-    Serial.printf("  DEVICE ID / MAC : %s\n", deviceId.c_str());
-    Serial.println("========================================");
-    Serial.println("  WiFi Access Point Mode");
-
-    Serial.println("========================================");
+    const String apIP = WiFi.softAPIP().toString();
+    Serial.printf("\n  BOONDOCK %s | %s | %s\n",
+                  PRODUCT_AP_ENV_LABEL, FIRMWARE, deviceId.c_str());
+    Serial.printf("  %s WiFi access point\n", recovery ? "Recovery" : "Setup");
     Serial.printf("  WIFI SSID       : %s\n", apSSID.c_str());
     Serial.printf("  WIFI Password   : %s\n", apPassword);
-    Serial.printf("  ACCESS Point IP : %s\n", apIP.toString().c_str());
-    Serial.println("========================================");
-    Serial.println("  Connect to the WiFi network and open");
-    Serial.printf("  http://%s\n", apIP.toString().c_str());
-    Serial.println("========================================");
+    Serial.printf("  Setup URL       : http://%s\n\n", apIP.c_str());
 
-    // Setup web server
-    setupAPWebServer();
+    recoveryAP = recovery;
+    recoveryAPIdleSince = millis();
+    // Publish the AP after radio setup. The web task owns both HTTP servers.
+    apModeActive.store(true);
+    return true;
+}
+
+static void serviceSetupAP()
+{
+    if (apWebServer == nullptr)
+        setupAPWebServer();
+    apWebServer->handleClient();
+
+    if (!recoveryAP)
+        return;
+
+    const unsigned long now = millis();
+    if (testConnectionInProgress || WiFi.softAPgetStationNum() > 0)
+    {
+        recoveryAPIdleSince = now;
+        return;
+    }
+    if (now - recoveryAPIdleSince < kRecoveryAPIdleTimeoutMs)
+        return;
+
+    // An abandoned setup test may still have its temporary station connected.
+    WiFi.disconnect();
+    if (!enterpriseWiFiStop() || !WiFi.mode(WIFI_OFF))
+    {
+        logWarnf("[AP] Could not close the idle WiFi recovery Access Point");
+        recoveryAPIdleSince = now;
+        return;
+    }
+    apWebServer->stop();
+    delete apWebServer;
+    apWebServer = nullptr;
+    testConnectionIp = "";
+    testConnectionResult = false;
+    testConnectionMessage = "";
+    lastClientActivityMs = 0;
+    clientWasActive = false;
+    recoveryAP = false;
+    logInfof("[AP] WiFi recovery Access Point closed; retrying saved networks");
+    apModeActive.store(false);
 }
 
 // Forward declarations for main web server handlers
@@ -2540,6 +2637,7 @@ static void handleMainNetworkConfig()
     // This ensures the frontend always receives the 3 network configurations
     DynamicJsonDocument doc(4096);
     doc["changed"] = true;
+    doc["enterpriseWiFi"] = true;
     
     JsonArray configs = doc.createNestedArray("wifiConfigs");
     
@@ -2559,6 +2657,76 @@ static void handleMainNetworkConfig()
     String response;
     serializeJson(doc, response);
     mainWebServer->send(200, "application/json", response);
+}
+
+static void handleMainEnterpriseWiFiConfig()
+{
+    DynamicJsonDocument json(512);
+    EnterpriseWiFiProfile profile;
+    const bool configured = enterpriseWiFiConfigured();
+    json["configured"] = configured;
+    if (configured && enterpriseWiFiLoad(profile))
+    {
+        json["ssid"] = profile.ssid;
+        json["identity"] = profile.identity;
+        json["username"] = profile.username;
+    }
+    String response;
+    serializeJson(json, response);
+    mainWebServer->sendHeader("Cache-Control", "no-store");
+    mainWebServer->send(200, "application/json", response);
+}
+
+static void handleMainEnterpriseWiFiSave()
+{
+    if (!mainWebServer->hasArg("plain"))
+    {
+        apiError(mainWebServer, 400, API_ERR_MISSING_PARAM, "Missing request body.");
+        return;
+    }
+
+    DynamicJsonDocument json(kEnterpriseWiFiJsonCapacity);
+    if (deserializeJson(json, mainWebServer->arg("plain")))
+    {
+        apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, "Invalid Enterprise WiFi configuration.");
+        return;
+    }
+
+    EnterpriseWiFiProfile profile;
+    if (enterpriseWiFiLoad(profile) &&
+        profile.ssid == (json["ssid"] | "") && profile.username == (json["username"] | ""))
+    {
+        if (!json.containsKey("password"))
+            json["password"] = profile.password;
+        if (!json.containsKey("caPem"))
+            json["caPem"] = profile.caPem;
+        if (json.overflowed())
+        {
+            apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, "Enterprise WiFi configuration is too large.");
+            return;
+        }
+    }
+    if (const char *error = enterpriseWiFiParse(json.as<JsonObjectConst>(), profile))
+    {
+        apiError(mainWebServer, 400, API_ERR_INVALID_VALUE, error);
+        return;
+    }
+    if (!enterpriseWiFiSave(profile))
+    {
+        apiError(mainWebServer, 500, API_ERR_INTERNAL, "Could not save the Enterprise WiFi profile.");
+        return;
+    }
+    apiOk(mainWebServer);
+}
+
+static void handleMainEnterpriseWiFiDelete()
+{
+    if (!enterpriseWiFiClear())
+    {
+        apiError(mainWebServer, 500, API_ERR_INTERNAL, "Could not remove the Enterprise WiFi profile.");
+        return;
+    }
+    apiOk(mainWebServer);
 }
 
 static void handleMainNetworkSave()
@@ -3029,6 +3197,12 @@ static void handleMainAdvancedFactoryReset()
     if (!mainWebServer)
         return;
     
+    if (enterpriseWiFiConfigured() && !enterpriseWiFiClear())
+    {
+        apiError(mainWebServer, 500, API_ERR_INTERNAL, "Could not clear the Enterprise WiFi profile.");
+        return;
+    }
+
     // Clear all settings
     // This is a simplified version - in reality you'd want to clear NVS
     
@@ -3802,6 +3976,9 @@ static void setupMainWebServer()
     mainWebServer->on("/api/advanced/test-upload-host", HTTP_POST, []() { handleMainTestUploadHost(); });
     mainWebServer->on("/api/advanced/upload-locations", HTTP_GET, []() { handleMainUploadLocations(); });
     mainWebServer->on("/api/advanced/wifi-tx-power-settings", HTTP_GET, []() { handleMainWifiTxPowerSettings(); });
+    mainWebServer->on("/api/network/enterprise", HTTP_GET, handleMainEnterpriseWiFiConfig);
+    mainWebServer->on("/api/network/enterprise", HTTP_POST, handleMainEnterpriseWiFiSave);
+    mainWebServer->on("/api/network/enterprise", HTTP_DELETE, handleMainEnterpriseWiFiDelete);
     mainWebServer->on("/api/network/config", HTTP_GET, []() { handleMainNetworkConfig(); });
     mainWebServer->on("/api/network/save", HTTP_POST, []() { handleMainNetworkSave(); });
     // Firmware update endpoint - handles file upload
@@ -3849,7 +4026,6 @@ static void setupMainWebServer()
     }
     if (ws != nullptr)
     {
-        ws->~AsyncWebSocket();
         delete ws;
     }
     
@@ -4068,17 +4244,9 @@ void boondock_server_loop()
         // so nothing more to do for it on this loop tick.
     }
     
-    // Handle AP mode web server
-    if (apModeActive && apWebServer != nullptr)
-    {
-        // Check if there's a client before processing
-        // handleClient() will process any pending requests
-        apWebServer->handleClient();
-        // Note: Activity is tracked in individual handlers via markClientActivity()
-    }
-    
-    // Handle main web server (only when not in AP mode and WiFi is connected)
-    if (!apModeActive && WiFi.status() == WL_CONNECTED)
+    // Use one mode snapshot so the two HTTP listeners never contend for port 80.
+    const bool setupActive = apModeActive.load();
+    if (!setupActive && WiFi.status() == WL_CONNECTED)
     {
         if (!mainServerActive)
         {
@@ -4114,7 +4282,6 @@ void boondock_server_loop()
             }
             if (ws != nullptr)
             {
-                ws->~AsyncWebSocket();
                 delete ws;
                 ws = nullptr;
             }
@@ -4125,6 +4292,8 @@ void boondock_server_loop()
         lastClientActivityMs = 0;
         clientWasActive = false;
     }
+    if (setupActive)
+        serviceSetupAP();
 }
 
 bool boondock_server_hasClient()

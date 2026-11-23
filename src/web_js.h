@@ -76,6 +76,10 @@ function showConfirm(message, title = 'Confirm') {
     });
 }
 function setupEventListeners() {
+    const enterprise = document.getElementById('wifi-enterprise');
+    enterprise.addEventListener('change', () => {
+        document.getElementById('wifi-enterprise-fields').hidden = !enterprise.checked;
+    });
     document.getElementById('scan-btn').addEventListener('click', scanWiFi);
     document.getElementById('wifi-scan').addEventListener('change', function() {
         const selected = this.value;
@@ -124,6 +128,7 @@ async function loadDeviceInfo() {
         const response = await fetch('/api/device-info');
         const data = await response.json();
         deviceMac = data.mac || 'Unknown';
+        document.getElementById('wifi-enterprise-option').hidden = data.enterpriseWiFi !== true;
         firmwareVersion = data.firmware || 'Unknown';
         let deviceType = 'WiFi Setup';
         if (firmwareVersion.includes('ECHO')) {
@@ -181,21 +186,34 @@ async function scanWiFi() {
         scanBtn.textContent = 'Refresh Scan';
     }
 }
+function readWiFiProfile() {
+    const profile = {
+        ssid: document.getElementById('wifi-ssid').value,
+        password: document.getElementById('wifi-password').value
+    };
+    if (document.getElementById('wifi-enterprise').checked) {
+        profile.enterprise = true;
+        profile.username = document.getElementById('wifi-enterprise-username').value;
+        profile.identity = document.getElementById('wifi-enterprise-identity').value;
+        profile.caPem = document.getElementById('wifi-enterprise-ca').value.trim();
+    }
+    return profile;
+}
 async function connectToWiFi() {
-    const ssid = document.getElementById('wifi-ssid').value.trim();
-    const password = document.getElementById('wifi-password').value;
+    const profile = readWiFiProfile();
+    const {ssid} = profile;
     goToStep(2);
     document.getElementById('connecting-message').textContent = 'Connecting to ' + ssid + '... Please wait.';
     try {
         const testResponse = await fetch('/api/wifi/test', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ssid: ssid, password: password})
+            body: JSON.stringify(profile)
         });
         const testData = await testResponse.json();
         if (!testData.success) {
             goToStep(1);
-            await showAlert('Connection failed: ' + (testData.message || 'Unknown error') + '\n\nPlease check your SSID and password and try again.', 'Connection Failed');
+            await showAlert('Connection failed: ' + (testData.message || 'Unknown error'), 'Connection Failed');
             return;
         }
         document.getElementById('connecting-message').textContent = 'Connection successful! Getting device information...';
@@ -213,9 +231,8 @@ async function connectToWiFi() {
     }
 }
 async function saveAndReboot() {
-    const ssid = document.getElementById('wifi-ssid').value.trim();
-    const password = document.getElementById('wifi-password').value;
-    if (!ssid) {
+    const profile = readWiFiProfile();
+    if (!profile.ssid) {
         await showAlert('Please enter a WiFi network name', 'Input Required');
         return;
     }
@@ -230,7 +247,7 @@ async function saveAndReboot() {
         const response = await fetch('/api/wifi/save', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ssid: ssid, password: password})
+            body: JSON.stringify(profile)
         });
         const data = await response.json();
         if (data.success) {

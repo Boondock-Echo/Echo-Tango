@@ -654,6 +654,19 @@ const pageTemplates = {
         </div>
     `,
     network: `
+        <section id="enterprise-wifi" class="wifi-config-card" hidden>
+            <h3>WPA2-Enterprise (PEAP)</h3>
+            <form id="enterprise-wifi-form">
+                <div class="form-group"><label>SSID <input name="ssid" class="form-control" maxlength="32" required></label></div>
+                <div class="form-group"><label>Username <input name="username" class="form-control" maxlength="128" autocomplete="username" required></label></div>
+                <div class="form-group"><label>Outer identity (optional) <input name="identity" class="form-control" maxlength="128"></label></div>
+                <div class="form-group"><label>Password <input name="password" class="form-control" type="password" maxlength="128" autocomplete="new-password"></label></div>
+                <div class="form-group"><label>Trusted CA certificate (PEM) <textarea name="caPem" class="form-control" maxlength="4096" rows="4" spellcheck="false"></textarea></label></div>
+                <p class="form-help">The Enterprise profile takes priority on the next reconnect. For the same SSID and username, leave the password and CA fields blank to keep their saved values.</p>
+                <button type="submit" class="btn-primary">Save Enterprise profile</button>
+                <button type="button" id="enterprise-wifi-remove" class="btn-secondary" hidden>Remove Enterprise profile</button>
+            </form>
+        </section>
         <div id="wifi-configs">
             <!-- WiFi configurations will be dynamically loaded -->
         </div>
@@ -4487,6 +4500,59 @@ function initNetworkPage() {
     loadNetworkConfig().finally(hideLoadingPopup);
 }
 
+async function loadEnterpriseWiFiForm() {
+    const section = document.getElementById('enterprise-wifi');
+    if (!section) return;
+    const response = await fetch('/api/network/enterprise', {cache: 'no-store'});
+    if (!response.ok) throw new Error('Could not load the Enterprise WiFi profile.');
+    const profile = await response.json();
+    const form = document.getElementById('enterprise-wifi-form');
+    const remove = document.getElementById('enterprise-wifi-remove');
+    form.reset();
+    for (const field of ['ssid', 'username', 'identity']) {
+        form.elements.namedItem(field).value = profile[field] || '';
+    }
+    remove.hidden = !profile.configured;
+    section.hidden = false;
+
+    const update = async (method, body) => {
+        const submit = form.querySelector('[type="submit"]');
+        submit.disabled = true;
+        remove.disabled = true;
+        try {
+            const result = await fetch('/api/network/enterprise', {
+                method,
+                headers: {'Content-Type': 'application/json'},
+                body
+            });
+            const data = await result.json();
+            if (!result.ok) throw new Error(data.message || 'Could not update the Enterprise WiFi profile.');
+            await loadEnterpriseWiFiForm();
+            await showInfoModal('The change takes effect on the next WiFi reconnect or reboot.', 'Enterprise WiFi');
+        } catch (error) {
+            await showInfoModal(error.message, 'Enterprise WiFi');
+        } finally {
+            submit.disabled = false;
+            remove.disabled = false;
+        }
+    };
+
+    form.onsubmit = event => {
+        event.preventDefault();
+        const fields = new FormData(form);
+        const profile = Object.fromEntries(fields);
+        profile.caPem = profile.caPem.trim();
+        if (!profile.password) delete profile.password;
+        if (!profile.caPem) delete profile.caPem;
+        void update('POST', JSON.stringify(profile));
+    };
+    remove.onclick = async () => {
+        if (await showConfirmModal('Remove the saved Enterprise WiFi profile?', 'Enterprise WiFi')) {
+            await update('DELETE');
+        }
+    };
+}
+
 // HTTP response renderer for network config
 function renderNetworkConfig(data) {
     hideConnectionError();
@@ -4592,6 +4658,9 @@ async function loadNetworkConfig() {
         
         // Render HTTP configuration response
         renderNetworkConfig(data);
+        if (data.enterpriseWiFi === true) {
+            await loadEnterpriseWiFiForm();
+        }
         
         // The rest of the rendering is now in renderNetworkConfig
         return;

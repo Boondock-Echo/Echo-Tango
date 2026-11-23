@@ -79,12 +79,10 @@ bool handleUploadOne()
         return false;
     }
 
-    // WiFi check
+    // network_loop() owns automatic reconnects and their backoff.
     if (!isWiFiConnected())
     {
         logDebugf("[UploadTask] skip reason=wifi");
-        esp_task_wdt_reset();
-        connectToWiFi();
         return false;
     }
 
