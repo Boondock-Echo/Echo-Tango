@@ -21,6 +21,36 @@ constexpr float kMostSensitiveDb = AUDIO_DB_SENSITIVITY_HIGH;
 constexpr float kLeastSensitiveDb = AUDIO_DB_SENSITIVITY_LOW;
 constexpr size_t kDbSmoothingWindow = AUDIO_DB_SMOOTHING_WINDOW;
 
+// Convert the cloud's 0-100 sensitivity (piecewise "gradient" scale) into the firmware's
+// linear 0-60 audioThreshold (recorder trigger dB = threshold - 80).
+//
+// Cloud scale (0 = least sensitive, 100 = most sensitive):
+//    0 -> -20 dB,  50 -> -40 dB,  100 -> -80 dB   (slope changes at 50)
+// Firmware scale (0 = most sensitive, 60 = least sensitive):
+//    0 -> -80 dB,  60 -> -20 dB                   (linear)
+// So: threshold = dB + 80, which gives cloud 0 -> 60, 50 -> 40, 100 -> 0.
+// Out-of-range input is clamped to 0-100.
+inline uint8_t mapCloudSensitivityToThreshold(int cloudSensitivity)
+{
+    if (cloudSensitivity < 0)
+        cloudSensitivity = 0;
+    else if (cloudSensitivity > 100)
+        cloudSensitivity = 100;
+
+    float db;
+    if (cloudSensitivity <= 50)
+        db = -20.0f - (20.0f * cloudSensitivity) / 50.0f;                  // -20 .. -40
+    else
+        db = -40.0f - (40.0f * (cloudSensitivity - 50)) / 50.0f;           // -40 .. -80
+
+    int threshold = static_cast<int>(db + 80.0f + 0.5f);                   // db is >= -80, so this is >= 0.5
+    if (threshold < 0)
+        threshold = 0;
+    else if (threshold > 60)
+        threshold = 60;
+    return static_cast<uint8_t>(threshold);
+}
+
 // Time constants
 constexpr time_t kMinimumValidEpochSeconds = 1609459200; // 2021-01-01T00:00:00Z
 constexpr unsigned long kNtpSyncTimeoutMs = 15000;

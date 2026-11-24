@@ -116,7 +116,14 @@ namespace
 
         if (cmd == "line_min_db")
         {
-            (void)applySettingParam("audio.audiothreshold", value);
+            // Cloud sends the 0-100 sensitivity; firmware stores the linear 0-60 threshold.
+            String sens = value;
+            sens.trim();
+            if (sens.length() > 0)
+            {
+                const int threshold = mapCloudSensitivityToThreshold(sens.toInt());
+                (void)applySettingParam("audio.audiothreshold", String(threshold));
+            }
             return false;
         }
 

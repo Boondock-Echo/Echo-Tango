@@ -3040,6 +3040,7 @@ bool settings_hasQueuedEventUpdate()
 // - Suppresses per-setting change events during the apply to avoid loops
 bool settings_applyJsonFromServer(const String &json)
 {
+    Serial.printf("Start!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
     if (json.length() == 0)
     {
         setSettingsError("Empty JSON payload from server");
@@ -3110,6 +3111,34 @@ bool settings_applyJsonFromServer(const String &json)
                     w.remove("ssid");
                 }
             }
+        }
+    }
+
+    // Server sends audio threshold as cloud sensitivity (0-100 gradient scale).
+    // Convert to firmware's linear 0-60 audioThreshold before the range check.
+    // Non-numeric values are left alone so the normal validation still applies.
+    JsonObject serverAudio;
+    if (doc.containsKey(JsonKeys::AUDIO) && doc[JsonKeys::AUDIO].is<JsonObject>())
+    {
+        serverAudio = doc[JsonKeys::AUDIO].as<JsonObject>();
+    }
+    else if (doc.containsKey("audio") && doc["audio"].is<JsonObject>())
+    {
+        serverAudio = doc["audio"].as<JsonObject>();
+    }
+    if (!serverAudio.isNull())
+    {
+        const char *thresholdKey = nullptr;
+        if (serverAudio.containsKey(JsonKeys::AUDIO_THRESHOLD))
+            thresholdKey = JsonKeys::AUDIO_THRESHOLD;
+        else if (serverAudio.containsKey("audioThreshold"))
+            thresholdKey = "audioThreshold";
+
+        if (thresholdKey != nullptr && serverAudio[thresholdKey].is<int>())
+        {
+            Serial.printf("IN!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+            const int cloudSensitivity = serverAudio[thresholdKey].as<int>();
+            serverAudio[thresholdKey] = mapCloudSensitivityToThreshold(cloudSensitivity);
         }
     }
 
